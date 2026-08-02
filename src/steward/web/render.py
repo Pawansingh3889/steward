@@ -153,6 +153,50 @@ def nav(here: str, links: Sequence[tuple[str, str]]) -> str:
     return f'<nav class="nav">{items_html}</nav>'
 
 
+# No interpolation anywhere in here, so nothing from the database can reach it.
+# It reads one key out of localStorage and writes the same one back; it makes no
+# request, and there is nothing on the page for it to read.
+THEME_SCRIPT_HTML = """<script>
+(() => {
+  const KEY = "steward-theme";
+  const root = document.documentElement;
+
+  // Applied before the first paint rather than on DOMContentLoaded. Later than
+  // this and the page renders the system's choice, then corrects itself a beat
+  // afterwards — which looks exactly like a bug, and on a dashboard about
+  // trustworthiness it is not a good first impression.
+  const saved = localStorage.getItem(KEY);
+  if (saved === "dark" || saved === "light") root.dataset.theme = saved;
+
+  const showing = () => root.dataset.theme
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
+  addEventListener("DOMContentLoaded", () => {
+    const slot = document.querySelector(".theme");
+    if (!slot) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "theme-toggle";
+    const label = () => {
+      const next = showing() === "dark" ? "light" : "dark";
+      button.textContent = next;
+      // The word alone reads as a statement of the current theme rather than an
+      // offer to change it, which is the wrong way round for a screen reader.
+      button.setAttribute("aria-label", "Switch to the " + next + " theme");
+    };
+    button.addEventListener("click", () => {
+      const next = showing() === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      localStorage.setItem(KEY, next);
+      label();
+    });
+    label();
+    slot.appendChild(button);
+  });
+})();
+</script>"""
+
+
 def document(*, title: str, banner_html: str, nav_html: str, body_html: str) -> str:
     """One self-contained file.
 
@@ -162,13 +206,20 @@ def document(*, title: str, banner_html: str, nav_html: str, body_html: str) -> 
     colleague should still look like the thing they saw.
     """
     sheet_html = style.STYLESHEET
+    theme_script_html = THEME_SCRIPT_HTML
     return (
         "<!doctype html>"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{text(title)}</title>"
+        # Ahead of the stylesheet, not after it. It has to have set the theme
+        # before anything is painted, and putting it first also keeps the one
+        # legitimate script on these pages from sitting in the `</style><script>`
+        # adjacency that `test_a_hostile_name_cannot_inject_markup` watches for.
+        f"{theme_script_html}"
         f"<style>{sheet_html}</style>"
         "</head><body>"
-        f'<div class="page">{banner_html}{nav_html}{body_html}</div>'
+        f'<div class="page"><div class="theme"></div>'
+        f"{banner_html}{nav_html}{body_html}</div>"
         "</body></html>"
     )

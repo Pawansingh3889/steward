@@ -549,6 +549,11 @@ def test_a_hostile_name_cannot_inject_markup(db: str) -> None:
     assert "<script>alert(2)</script>" not in body
     assert "</style><script>" not in body
     assert "<img onerror" not in body
+    # The page carries exactly one script — the theme control's, a constant with
+    # no interpolation in it. Counting is what the assertion above was reaching
+    # for: not "that adjacency is absent" but "nothing else got in".
+    assert body.count("<script") == 1
+    assert 'const KEY = "steward-theme"' in body
 
 
 ESCAPING_HELPERS = frozenset(
@@ -730,6 +735,58 @@ def test_the_contrast_check_can_actually_fail() -> None:
     the exact bug this was written for: --accent was doing duty as a fill."""
     assert contrast("#ffffff", "#7ba0ff") < AA_TEXT
     assert contrast("#ffffff", "#1f4fd8") >= AA_TEXT
+
+
+# --- the theme control -------------------------------------------------------
+
+
+def test_the_dark_palette_is_written_once_for_both_ways_of_asking() -> None:
+    """The system's preference and the reader's override need the same values.
+    Kept as one Python string and interpolated twice, because two hand-edited
+    copies of a palette is two palettes, and the one that drifts is whichever
+    gets looked at less."""
+    from steward.web import style
+
+    blocks = re.findall(r"\{(\s*color-scheme: dark;.*?)\}", style.STYLESHEET, re.DOTALL)
+
+    assert len(blocks) == 2
+    assert len(set(blocks)) == 1, "the two dark palettes have drifted apart"
+
+
+def test_the_readers_choice_outranks_the_machines(client: TestClient) -> None:
+    """Equal specificity, so it comes down to source order: the override has to
+    be written after the media query or preferring dark would be unoverridable."""
+    from steward.web import style
+
+    system = style.STYLESHEET.index("@media (prefers-color-scheme: dark)")
+    reader = style.STYLESHEET.index(':root[data-theme="dark"]')
+
+    assert system < reader
+    # And the media query must exclude an explicit light choice, or picking
+    # light on a dark-set machine would do nothing at all.
+    assert ':root:not([data-theme="light"])' in style.STYLESHEET
+
+
+def test_the_theme_control_ships_empty(client: TestClient) -> None:
+    """The script builds the button. With scripting off the page shows no
+    control rather than one that cannot do anything — the same rule the console
+    follows about not offering an action it has no way to carry out."""
+    body = client.get("/").text
+    # Without the stylesheet too: `.theme-toggle` is legitimately styled there,
+    # and the question is what the *document* contains, not what it mentions.
+    markup = re.sub(r"<(script|style)>.*?</\1>", "", body, flags=re.DOTALL)
+
+    assert '<div class="theme"></div>' in markup
+    assert "theme-toggle" not in markup
+    assert "<button" not in markup
+
+
+def test_the_theme_is_settled_before_the_stylesheet(client: TestClient) -> None:
+    """Later than this and the page paints the system's choice, then corrects
+    itself a beat afterwards, which looks like a bug."""
+    body = client.get("/").text
+
+    assert body.index("<script") < body.index("<style")
 
 
 # --- the scales --------------------------------------------------------------

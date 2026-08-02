@@ -40,9 +40,35 @@ page cap and the media query bounds are sizes of particular things.
 
 from __future__ import annotations
 
+# The dark palette, written once and used twice: the system's preference, and
+# the reader's override of it. Two hand-maintained copies of a palette is two
+# palettes, and the one that drifted would be whichever gets looked at less.
+_DARK = """
+  color-scheme: dark;
+  --bg: #101318;
+  --panel: #171b22;
+  --panel-sunken: #1d222b;
+  --ink: #e9ecf1;
+  --ink-soft: #aab3c1;
+  --ink-faint: #848d9e;   /* 4.78:1 on --panel-sunken; #7f8899 was 4.47 */
+  --line: #262c37;
+  --line-strong: #333b49;
+  --accent: #7ba0ff;                /* 6.84:1 on --panel */
+  --accent-fill: #3457b8;           /* deliberately not --accent: white on
+                                       that was 2.53:1. This is 6.56:1. */
+  --accent-on-fill: #ffffff;
+  --accent-on-fill-muted: #d4dcf7;  /* 4.80:1 on --accent-fill */
+  --good-bg: #12301f; --good-ink: #7ddba4; --good-line: #22563a;
+  --wait-bg: #33260c; --wait-ink: #f0c274; --wait-line: #5c451a;
+  --bad-bg: #35171a;  --bad-ink: #f0a0a0;  --bad-line: #5d2a2d;
+  --flat-bg: #1f242e; --flat-ink: #aab3c1; --flat-line: #333b49;
+  --unknown-ink: #7f8899; --unknown-line: #3d4552;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .22);
+"""
+
 STYLESHEET = """
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #f6f7f9;
   --panel: #ffffff;
   --panel-sunken: #f1f3f6;
@@ -102,29 +128,13 @@ STYLESHEET = """
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* What the machine asked for — unless the reader has said otherwise here. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #101318;
-    --panel: #171b22;
-    --panel-sunken: #1d222b;
-    --ink: #e9ecf1;
-    --ink-soft: #aab3c1;
-    --ink-faint: #848d9e;   /* 4.78:1 on --panel-sunken; #7f8899 was 4.47 */
-    --line: #262c37;
-    --line-strong: #333b49;
-    --accent: #7ba0ff;                /* 6.84:1 on --panel */
-    --accent-fill: #3457b8;           /* deliberately not --accent: white on
-                                         that was 2.53:1. This is 6.56:1. */
-    --accent-on-fill: #ffffff;
-    --accent-on-fill-muted: #d4dcf7;  /* 4.80:1 on --accent-fill */
-    --good-bg: #12301f; --good-ink: #7ddba4; --good-line: #22563a;
-    --wait-bg: #33260c; --wait-ink: #f0c274; --wait-line: #5c451a;
-    --bad-bg: #35171a;  --bad-ink: #f0a0a0;  --bad-line: #5d2a2d;
-    --flat-bg: #1f242e; --flat-ink: #aab3c1; --flat-line: #333b49;
-    --unknown-ink: #7f8899; --unknown-line: #3d4552;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .22);
-  }
+  :root:not([data-theme="light"]) {__DARK__}
 }
+/* What the reader asked for, which outranks the machine. Equal specificity to
+   the rule above, so this winning is a matter of coming after it. */
+:root[data-theme="dark"] {__DARK__}
 
 * { box-sizing: border-box; }
 body {
@@ -171,6 +181,27 @@ summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* --- the theme control --------------------------------------------------- */
+/* The slot ships empty and the script fills it, so a page with scripting off
+   shows no control rather than a dead one — the same rule the console follows
+   about not offering an action it cannot carry out. An empty flex row collapses
+   to nothing, so that page loses no space to it either. */
+.theme { display: flex; justify-content: flex-end; gap: var(--space-8); }
+.theme-toggle {
+  font: inherit; font-size: var(--text-12); cursor: pointer;
+  letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-faint); background: transparent;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-pill);
+  padding: var(--space-4) var(--space-12);
+}
+.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+/* Sized for a finger only where there is one. The composer's buttons take 44px
+   unconditionally because they are the primary action of a chat; this is chrome,
+   and 44px of it in the corner of a desktop page is just a large button. */
+@media (pointer: coarse) {
+  .theme-toggle { min-height: 44px; min-width: 44px; }
 }
 
 /* --- the banner --------------------------------------------------------- */
@@ -341,6 +372,10 @@ td:last-child, th:last-child { padding-right: 0; }
 .plan-items li { margin-bottom: var(--space-2); }
 .books-it { color: var(--ink-faint); font-size: var(--text-13); }
 """
+
+# One palette, two selectors. Substituted rather than concatenated so the CSS
+# above stays readable as CSS.
+STYLESHEET = STYLESHEET.replace("__DARK__", _DARK)
 
 # --- the demo console ---------------------------------------------------------
 # Two phone lines side by side. Deliberately unlike the sponsor dashboard: that
