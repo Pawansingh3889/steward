@@ -122,7 +122,11 @@ def events(
                 "plan_proposed",
                 str(plan["created_ts"]),
                 target_cents=int(plan["target_cents"]),
-                kind=str(plan["kind"]),
+                # `plan_kind`, not `kind`: `kind` is the event's own name and a
+                # detail field of that name collides with it, so this raised a
+                # TypeError for anybody who had a plan. Same reason
+                # `correction_kind` above is spelled the way it is.
+                plan_kind=str(plan["kind"]),
             )
         )
         if plan["activated_ts"]:

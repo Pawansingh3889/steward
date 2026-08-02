@@ -232,3 +232,33 @@ def test_an_unknown_person_is_an_error_not_an_empty_report(db: str) -> None:
     is a conclusion rather than a missing row."""
     with pytest.raises(store.NotFoundError):
         pilot.events(999, db_path=db)
+
+
+def test_a_plan_does_not_break_the_export(db: str, household) -> None:
+    """`plan_proposed` carries the plan's own kind, and that field is named
+    `plan_kind` because `kind` is the event's name.
+
+    It was `kind` at first, which collided with the parameter of the same name
+    and raised a TypeError — so `pilot.events` failed for anybody who had ever
+    made a plan, which is most of the people a pilot would be watching. Nothing
+    covered plans here, so it went unseen until a surface read the stream.
+    """
+    _, spender = household
+    store.insert_plan(
+        person_id=spender,
+        name="Lisbon",
+        kind="trip",
+        target_cents=60000,
+        currency="GBP",
+        cadence="monthly",
+        per_period_cents=15000,
+        start_date="2026-08-02",
+        finish_date="2026-12-02",
+        db_path=db,
+    )
+
+    stream = pilot.events(spender, db_path=db)
+
+    proposed = next(row for row in stream if row["kind"] == "plan_proposed")
+    assert proposed["plan_kind"] == "trip"
+    assert proposed["target_cents"] == 60000
