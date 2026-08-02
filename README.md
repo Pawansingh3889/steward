@@ -446,6 +446,26 @@ src/steward/
 except through `llm.py`. Policy decisions belong to
 [pay-warden](../pay-warden), called over MCP as a separate process.
 
+## See it run
+
+```bash
+export OPENAI_API_KEY=$(grep -m1 ^OPENAI_API_KEY= ~/projects/payoptimize/.env | cut -d= -f2-)
+export PAY_WARDEN_COMMAND=uv
+export PAY_WARDEN_ARGS="run --project ../pay-warden python -m pay_warden.server"
+export PAY_WARDEN_CWD=$HOME/projects/pay-warden
+
+uv run python scripts/demo.py
+```
+
+Two humans, two lines, a real language model, and a real policy engine in
+another process. Only the phone network is stubbed — messages print to the
+terminal; `--linq` sends them to real handsets.
+
+**It spends nothing by default.** pay-warden mints a Prava session the moment it
+*allows* a purchase, and the sandbox has a finite number of those — so the demo
+policy parks every purchase for the sponsor, which costs nothing and is the
+interesting path anyway. `--release` goes further and mints one real session.
+
 ## Development
 
 ```bash
