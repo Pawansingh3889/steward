@@ -1,0 +1,261 @@
+"""The direct interface to your own memory.
+
+Everything here works with `OPENAI_API_KEY` unset. That is the design, not a
+side effect: `steward memory list` and `steward memory forget` are how a person
+inspects and corrects what is held about them, and neither may depend on the
+model being configured, reachable, or willing. The agent is one consumer of
+memory; it is not the gatekeeper of it.
+
+`steward ask` is the exception and says so when the model is missing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from typing import Any
+
+from . import config, store
+from .agent import llm
+from .memory import recall
+from .models import FactKind, Role
+
+BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+
+
+def _out(text: str = "") -> None:
+    print(text, flush=True)
+
+
+def _resolve_person(args: argparse.Namespace) -> dict[str, Any]:
+    """Find the person a command is about, by id or phone.
+
+    Fails loudly on an ambiguous or missing person rather than defaulting to
+    "the only one in the database": that default is right until the day a
+    household has two people in it, and then it silently shows one of them the
+    other's memory.
+    """
+    if args.person:
+        row = store.get_person(int(args.person), db_path=args.db)
+        if row is None:
+            raise SystemExit(f"no person with id {args.person}")
+        return row
+    if args.phone:
+        row = store.person_by_phone(args.phone, db_path=args.db)
+        if row is None:
+            raise SystemExit(f"nobody enrolled with phone {args.phone}")
+        return row
+    people = store.list_people(db_path=args.db)
+    if not people:
+        raise SystemExit("nobody is enrolled yet — try: steward people add --name … --role spender")
+    if len(people) > 1:
+        listing = ", ".join(f"{p['id']}={p['name']}" for p in people)
+        raise SystemExit(f"which person? pass --person or --phone. enrolled: {listing}")
+    return people[0]
+
+
+# --- people ------------------------------------------------------------------
+
+
+def cmd_people_list(args: argparse.Namespace) -> int:
+    people = store.list_people(db_path=args.db)
+    if args.json:
+        _out(json.dumps(people, indent=2))
+        return 0
+    if not people:
+        _out("nobody enrolled yet.")
+        return 0
+    for person in people:
+        funded = f" funded by {person['sponsor_id']}" if person["sponsor_id"] else ""
+        contact = person["phone"] or person["email"] or "no contact"
+        _out(f"  {person['id']:>3}  {BOLD}{person['name']}{RESET}  {person['role']}{funded}")
+        _out(f"       {DIM}{contact}{RESET}")
+    return 0
+
+
+def cmd_people_add(args: argparse.Namespace) -> int:
+    if args.role not in Role.ALL:
+        raise SystemExit(f"role must be one of: {', '.join(Role.ALL)}")
+    person_id = store.insert_person(
+        name=args.name,
+        role=args.role,
+        sponsor_id=args.sponsor,
+        phone=args.phone,
+        email=args.email,
+        db_path=args.db,
+    )
+    _out(f"enrolled {args.name} as {args.role} (id {person_id})")
+    return 0
+
+
+# --- memory ------------------------------------------------------------------
+
+
+def cmd_memory_list(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    held = recall.everything(int(person["id"]), db_path=args.db)
+    if args.json:
+        _out(json.dumps(held, indent=2))
+        return 0
+
+    _out(f"\n{BOLD}what steward knows about {person['name']}{RESET}\n")
+    if held["facts"]:
+        _out(f"{BOLD}facts{RESET}  {DIM}(these drive decisions){RESET}")
+        for fact in held["facts"]:
+            _out(f"  {fact['id']:>4}  {fact['kind']:<10} {fact['key']:<18} {fact['value']}")
+            _out(f"        {DIM}{fact['source']} · since {fact['since']}{RESET}")
+    else:
+        _out(f"{DIM}no facts stored.{RESET}")
+
+    _out()
+    if held["episodes"]:
+        _out(f"{BOLD}things you've said{RESET}  {DIM}(context only, never grounds to spend){RESET}")
+        for episode in held["episodes"]:
+            _out(f"  {episode['id']:>4}  {episode['text'][:80]}")
+            _out(f"        {DIM}{episode['at']}{RESET}")
+    else:
+        _out(f"{DIM}no conversation remembered.{RESET}")
+
+    _out(f"\n{DIM}forget any of it:  steward memory forget --fact ID   (or --episode ID){RESET}\n")
+    return 0
+
+
+def cmd_memory_search(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    found = recall.search(int(person["id"]), args.query, limit=args.limit, db_path=args.db)
+    if args.json:
+        _out(json.dumps(found, indent=2))
+        return 0
+    if not found:
+        _out(f"{DIM}nothing resembling that — as far as steward knows, it was never said.{RESET}")
+        return 0
+    for episode in found:
+        _out(f"  {episode['episode_id']:>4}  [{episode['similarity']:.2f}]  {episode['text']}")
+    return 0
+
+
+def cmd_memory_forget(args: argparse.Namespace) -> int:
+    if bool(args.fact) == bool(args.episode):
+        raise SystemExit("pass exactly one of --fact ID or --episode ID")
+    person = _resolve_person(args)
+    kind = recall.FACT if args.fact else recall.EPISODE
+    item_id = int(args.fact or args.episode)
+    try:
+        result = recall.forget(kind, item_id, person_id=int(person["id"]), db_path=args.db)
+    except store.NotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"forgotten: {kind} {item_id} — {result['was']!r}")
+    _out(f"{DIM}it will not influence any future decision.{RESET}")
+    return 0
+
+
+def cmd_memory_add(args: argparse.Namespace) -> int:
+    """State a fact directly. Useful for setting up, and for correcting the
+    agent without having to talk it round."""
+    if args.kind not in FactKind.ALL:
+        raise SystemExit(f"kind must be one of: {', '.join(FactKind.ALL)}")
+    person = _resolve_person(args)
+    fact_id = store.upsert_fact(
+        person_id=int(person["id"]),
+        kind=args.kind,
+        key=args.key,
+        value=args.value,
+        source="stated",
+        db_path=args.db,
+    )
+    _out(f"remembered {args.kind}/{args.key} (id {fact_id})")
+    return 0
+
+
+# --- ask ---------------------------------------------------------------------
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    from .agent import loop
+
+    person = _resolve_person(args)
+    if not config.openai_api_key():
+        _out("OPENAI_API_KEY is unset, so the agent cannot answer.")
+        _out(f"{DIM}memory still works: try  steward memory list{RESET}")
+        return 2
+    try:
+        result = loop.run(args.question, person_id=int(person["id"]), db_path=args.db)
+    except llm.AgentError as exc:
+        raise SystemExit(f"the agent could not answer: {exc}") from exc
+    _out(f"\n{result['display_answer']}\n")
+    if result["evidence"]:
+        used = ", ".join(dict.fromkeys(e["tool"] for e in result["evidence"]))
+        _out(f"{DIM}consulted: {used}  ·  run {result['run_id']}{RESET}")
+    return 0
+
+
+# --- wiring ------------------------------------------------------------------
+
+
+def _add_person_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--person", type=int, default=0, help="person id")
+    parser.add_argument("--phone", default="", help="or find them by phone")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="steward", description=__doc__)
+    parser.add_argument("--db", default=None, help="database path (default: $STEWARD_DB)")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    people = sub.add_parser("people", help="who steward knows about").add_subparsers(
+        dest="people_command", required=True
+    )
+    people.add_parser("list", help="list enrolled people").set_defaults(func=cmd_people_list)
+    add = people.add_parser("add", help="enrol someone")
+    add.add_argument("--name", required=True)
+    add.add_argument("--role", required=True, help=f"one of: {', '.join(Role.ALL)}")
+    add.add_argument("--sponsor", type=int, default=None, help="id of who funds them")
+    add.add_argument("--phone", default="")
+    add.add_argument("--email", default="")
+    add.set_defaults(func=cmd_people_add)
+
+    memory = sub.add_parser("memory", help="inspect and correct what is held about you")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+
+    listing = memory_sub.add_parser("list", help="everything steward knows about a person")
+    _add_person_flags(listing)
+    listing.set_defaults(func=cmd_memory_list)
+
+    searching = memory_sub.add_parser("search", help="find something that was said")
+    _add_person_flags(searching)
+    searching.add_argument("query")
+    searching.add_argument("--limit", type=int, default=5)
+    searching.set_defaults(func=cmd_memory_search)
+
+    forgetting = memory_sub.add_parser("forget", help="delete one remembered thing")
+    _add_person_flags(forgetting)
+    forgetting.add_argument("--fact", type=int, default=0)
+    forgetting.add_argument("--episode", type=int, default=0)
+    forgetting.set_defaults(func=cmd_memory_forget)
+
+    adding = memory_sub.add_parser("add", help="state a fact directly")
+    _add_person_flags(adding)
+    adding.add_argument("--kind", required=True, help=f"one of: {', '.join(FactKind.ALL)}")
+    adding.add_argument("--key", required=True)
+    adding.add_argument("--value", required=True)
+    adding.set_defaults(func=cmd_memory_add)
+
+    asking = sub.add_parser("ask", help="ask the agent something")
+    _add_person_flags(asking)
+    asking.add_argument("question")
+    asking.set_defaults(func=cmd_ask)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    store.init_db(args.db)
+    result: int = args.func(args)
+    return result
+
+
+if __name__ == "__main__":
+    sys.exit(main())

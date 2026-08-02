@@ -23,7 +23,8 @@ from typing import Any
 import httpx
 
 from .. import config, store
-from ..models import Trigger
+from ..memory import episodic
+from ..models import Speaker, Trigger
 from . import llm
 from .privacy import Redactor
 from .tools import ToolBox
@@ -79,14 +80,30 @@ def run(
     person_id: int,
     db_path: str | None = None,
     trigger: str = Trigger.ASK,
+    record: bool = True,
     http: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """One full agent conversation. Returns the redacted answer, the evidence
-    trail, any memory writes, and usage — everything already safe to display."""
+    trail, any memory writes, and usage — everything already safe to display.
+
+    `record=False` runs without writing to the conversation log or episodic
+    memory, for callers that are asking on the person's behalf rather than
+    relaying something they said.
+    """
     started = time.monotonic()
     redactor = Redactor.build(db_path=db_path)
     model = config.agent_model()
     safe_question = redactor.redact(question)
+    # The log and episodic memory take the question as the person actually said
+    # it. Redaction happens on the way to the model, not on the way to disk:
+    # this is their machine and their words, and a memory that reads back
+    # [redacted] protects nothing from anyone who can already open the file.
+    turn_id = None
+    if record:
+        turn_id = store.insert_turn(
+            person_id=person_id, speaker=Speaker.PERSON, text=question, db_path=db_path
+        )
+        episodic.remember(person_id=person_id, text=question, turn_id=turn_id, db_path=db_path)
     run_id = store.insert_agent_run(
         person_id=person_id,
         trigger_kind=trigger,
@@ -142,6 +159,13 @@ def run(
             tokens_out=tokens_out,
             latency_ms=int((time.monotonic() - started) * 1000),
             db_path=db_path,
+        )
+    # Logged after the run succeeds, and as a turn only — never an episode. See
+    # models.Speaker: an agent that embeds its own output starts recalling its
+    # own guesses as though the person had said them.
+    if record:
+        store.insert_turn(
+            person_id=person_id, speaker=Speaker.STEWARD, text=safe_answer, db_path=db_path
         )
     return {
         "run_id": run_id,

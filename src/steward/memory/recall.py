@@ -1,0 +1,97 @@
+""" "What do you know about me?" — answered once, for every surface.
+
+Phase 1's exit criterion has two halves, and the second is the hard one:
+answerable *and correctable*. Correctable means a person can delete something
+without the model's cooperation. If the only route to deletion runs through a
+tool call the agent decides whether to make, then deletion is a request, not a
+guarantee — and this product is asking someone to hand over their errands, their
+schedule and their moods on the strength of that guarantee.
+
+So the functions here are the single implementation, and both surfaces are thin
+over them: `agent/tools.py` exposes them to the model, and `cli.py` exposes them
+to the person directly. The CLI path never loads the model at all. A person can
+delete a memory while OPENAI_API_KEY is unset, while the API is down, and while
+the agent is mid-conversation about the very thing they are deleting.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .. import store
+from . import episodic
+
+FACT = "fact"
+EPISODE = "episode"
+KINDS = (FACT, EPISODE)
+
+
+def _fact_view(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "kind": str(row["kind"]),
+        "key": str(row["key"]),
+        "value": str(row["value"]),
+        # "you told me" and "I worked it out" are different claims and must
+        # never be displayed as if they were the same one.
+        "source": str(row["source"]),
+        "since": str(row["created_ts"]),
+    }
+
+
+def _episode_view(row: dict[str, Any]) -> dict[str, Any]:
+    return {"id": int(row["id"]), "text": str(row["text"]), "at": str(row["created_ts"])}
+
+
+def everything(person_id: int, *, db_path: str | None = None) -> dict[str, Any]:
+    """Everything remembered about one person, in the order they would read it.
+
+    No limit and no pagination. Someone asking what is held about them is owed
+    all of it — a truncated answer to this particular question is a wrong one.
+    """
+    facts = store.list_facts(person_id, db_path=db_path)
+    episodes = store.list_episodes(person_id, db_path=db_path)
+    return {
+        "facts": [_fact_view(row) for row in facts],
+        "episodes": [_episode_view(row) for row in episodes],
+        "counts": {"facts": len(facts), "episodes": len(episodes)},
+    }
+
+
+def search(
+    person_id: int, query: str, *, limit: int = episodic.DEFAULT_LIMIT, db_path: str | None = None
+) -> list[dict[str, Any]]:
+    """Episodes resembling a query. Facts are not searched: they are few, keyed,
+    and meant to be read whole."""
+    found = episodic.search(person_id=person_id, query=query, limit=limit, db_path=db_path)
+    return [episodic.as_dict(episode) for episode in found]
+
+
+def forget(
+    kind: str, item_id: int, *, person_id: int | None = None, db_path: str | None = None
+) -> dict[str, Any]:
+    """Delete one remembered thing, whoever asked.
+
+    `person_id` is the scope check. It is optional only because the CLI runs as
+    the person themselves and has already established who that is; every caller
+    that takes the id from somewhere less trustworthy — the model, an HTTP
+    request — must pass it, and a guessed id then fails instead of deleting a
+    stranger's memory.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"unknown memory kind {kind!r}; use one of: {', '.join(KINDS)}")
+
+    if kind == FACT:
+        row = store.get_fact(item_id, db_path=db_path)
+        remove = store.delete_fact
+        label = str(row["key"]) if row else ""
+    else:
+        row = store.get_episode(item_id, db_path=db_path)
+        remove = store.delete_episode
+        label = str(row["text"])[:60] if row else ""
+
+    if row is None or (person_id is not None and int(row["person_id"]) != person_id):
+        raise store.NotFoundError(f"no {kind} {item_id} belonging to you")
+
+    remove(item_id, db_path=db_path)
+    return {"kind": kind, "id": item_id, "forgotten": True, "was": label}

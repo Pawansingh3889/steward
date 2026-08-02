@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import store
+from ..memory import recall
 from ..models import FactKind
 from .privacy import Redactor
 
@@ -75,6 +76,18 @@ SPECS: list[dict[str, Any]] = [
         " person refers back to something without repeating it.",
         {"limit": {"type": "integer", "description": "how many turns, default 20"}},
     ),
+    _spec(
+        "search_memory",
+        "Search things the person has said in the past, by resemblance. Use it"
+        " for context and colour — 'you mentioned this before'. Do NOT use it as"
+        " grounds for a decision or a purchase: what they said once is not the"
+        " same as a fact they have confirmed. Returns nothing when nothing"
+        " genuinely resembles the query, which means they never said it.",
+        {
+            "query": {"type": "string", "description": "what to look for"},
+            "limit": {"type": "integer", "description": "how many, default 5"},
+        },
+    ),
 ]
 
 
@@ -131,6 +144,14 @@ class ToolBox:
     def _tool_recall_facts(self, kind: str = "") -> dict[str, Any]:
         rows = store.list_facts(self.person_id, kind=kind, db_path=self.db_path)
         return {"facts": [self._fact_view(row) for row in rows], "count": len(rows)}
+
+    def _tool_search_memory(self, query: str = "", limit: int = 5) -> dict[str, Any]:
+        if not query:
+            return {"error": "query is required"}
+        found = recall.search(
+            self.person_id, query, limit=_clamp(limit, 5, ceiling=20), db_path=self.db_path
+        )
+        return {"episodes": found, "count": len(found)}
 
     def _tool_recent_conversation(self, limit: int = 20) -> dict[str, Any]:
         rows = store.recent_turns(self.person_id, limit=_clamp(limit, 20), db_path=self.db_path)

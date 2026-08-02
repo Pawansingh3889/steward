@@ -13,7 +13,7 @@ from steward import store
 from steward.agent import llm, loop
 from steward.agent.privacy import Redactor, pseudonym
 from steward.agent.tools import ToolBox
-from steward.models import FactKind, Role
+from steward.models import FactKind, Role, Speaker
 
 from .agent_stub import OpenAIStub, completion
 
@@ -43,7 +43,13 @@ def test_every_tool_is_described(box: ToolBox) -> None:
     specs = box.specs()
 
     names = {spec["function"]["name"] for spec in specs}
-    assert names == {"recall_facts", "remember_fact", "forget_fact", "recent_conversation"}
+    assert names == {
+        "recall_facts",
+        "remember_fact",
+        "forget_fact",
+        "recent_conversation",
+        "search_memory",
+    }
     assert all(spec["function"]["description"] for spec in specs)
 
 
@@ -246,3 +252,104 @@ def test_an_unconfigured_agent_says_so(db: str, spender: int, monkeypatch) -> No
 
     with pytest.raises(llm.AgentError, match="cannot think"):
         loop.run("hi", person_id=spender, db_path=db)
+
+
+# --- what a conversation leaves behind ---------------------------------------
+
+
+def test_both_sides_are_logged_but_only_the_person_becomes_an_episode(
+    db: str, spender: int
+) -> None:
+    """An agent that embeds its own output starts recalling its own guesses as
+    though the person had said them."""
+    stub = OpenAIStub([completion(content="I'll add soap to the list.")])
+
+    loop.run("I'm out of soap", person_id=spender, db_path=db, http=stub.client())
+
+    turns = store.recent_turns(spender, db_path=db)
+    assert [(t["speaker"], t["text"]) for t in turns] == [
+        (Speaker.PERSON, "I'm out of soap"),
+        (Speaker.STEWARD, "I'll add soap to the list."),
+    ]
+    episodes = store.list_episodes(spender, db_path=db)
+    assert [e["text"] for e in episodes] == ["I'm out of soap"]
+
+
+def test_the_episode_keeps_the_raw_words_while_the_model_saw_a_pseudonym(
+    db: str, spender: int
+) -> None:
+    """Redaction happens on the way to the model, not on the way to disk. Their
+    own memory of their own life must not read back [redacted]."""
+    stub = OpenAIStub([completion(content="noted")])
+
+    loop.run("Ana Whitfield needs soap", person_id=spender, db_path=db, http=stub.client())
+
+    assert store.list_episodes(spender, db_path=db)[0]["text"] == "Ana Whitfield needs soap"
+    assert "Ana Whitfield" not in stub.bodies()
+
+
+def test_the_episode_points_back_at_its_turn(db: str, spender: int) -> None:
+    stub = OpenAIStub([completion(content="ok")])
+
+    loop.run("I'm out of soap", person_id=spender, db_path=db, http=stub.client())
+
+    turn = store.recent_turns(spender, db_path=db)[0]
+    assert store.list_episodes(spender, db_path=db)[0]["turn_id"] == turn["id"]
+
+
+def test_record_false_leaves_no_trace_in_memory(db: str, spender: int) -> None:
+    """For callers asking on the person's behalf rather than relaying something
+    they said."""
+    stub = OpenAIStub([completion(content="ok")])
+
+    result = loop.run(
+        "is she out of anything?",
+        person_id=spender,
+        db_path=db,
+        record=False,
+        http=stub.client(),
+    )
+
+    assert store.recent_turns(spender, db_path=db) == []
+    assert store.list_episodes(spender, db_path=db) == []
+    # The audit row still exists — that is never optional.
+    assert store.get_agent_run(result["run_id"], db_path=db) is not None
+
+
+def test_a_failed_run_does_not_log_an_answer_that_never_happened(db: str, spender: int) -> None:
+    stub = OpenAIStub(status=500)
+
+    with pytest.raises(llm.AgentError):
+        loop.run("I'm out of soap", person_id=spender, db_path=db, http=stub.client())
+
+    # The question was said and is remembered; no reply was ever given.
+    assert [t["speaker"] for t in store.recent_turns(spender, db_path=db)] == [Speaker.PERSON]
+
+
+def test_the_agent_can_search_what_was_said_in_an_earlier_conversation(
+    db: str, spender: int
+) -> None:
+    first = OpenAIStub([completion(content="noted")])
+    loop.run("I'm completely out of soap", person_id=spender, db_path=db, http=first.client())
+
+    second = OpenAIStub(
+        [
+            completion(tool_calls=[("search_memory", {"query": "soap"})]),
+            completion(content="You mentioned soap."),
+        ]
+    )
+    result = loop.run("what did I need?", person_id=spender, db_path=db, http=second.client())
+
+    found = result["evidence"][0]["result"]["episodes"]
+    assert found[0]["text"] == "I'm completely out of soap"
+
+
+def test_search_memory_returns_nothing_rather_than_the_least_bad_match(
+    db: str, spender: int
+) -> None:
+    box = ToolBox(person_id=spender, redactor=Redactor.build(db_path=db), db_path=db)
+
+    assert box.dispatch("search_memory", {"query": "helicopters"}) == {
+        "episodes": [],
+        "count": 0,
+    }

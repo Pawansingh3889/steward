@@ -65,6 +65,20 @@ CREATE TABLE IF NOT EXISTS turns (
   shared_with_sponsor INTEGER NOT NULL DEFAULT 0,
   ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS episodes (
+  id INTEGER PRIMARY KEY,
+  person_id INTEGER NOT NULL REFERENCES people(id),
+  text TEXT NOT NULL,
+  -- float32 vector, packed. Opaque to SQL: similarity is computed in Python,
+  -- see memory/episodic.py for why that is the right size of solution here.
+  embedding BLOB NOT NULL,
+  -- The turn this was distilled from, when there was one. Nullable because an
+  -- episode can also come from an extractor with no conversation behind it.
+  turn_id INTEGER REFERENCES turns(id),
+  created_ts TEXT NOT NULL,
+  -- Tombstoned like facts, and for the same promise.
+  deleted_ts TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY,
   person_id INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +105,7 @@ CREATE TABLE IF NOT EXISTS agent_transcripts (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_live
   ON facts(person_id, kind, key) WHERE deleted_ts = '';
 CREATE INDEX IF NOT EXISTS idx_facts_person ON facts(person_id, kind);
+CREATE INDEX IF NOT EXISTS idx_episodes_person ON episodes(person_id, deleted_ts);
 CREATE INDEX IF NOT EXISTS idx_turns_person ON turns(person_id, ts);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_ts ON agent_runs(ts);
 CREATE INDEX IF NOT EXISTS idx_people_phone ON people(phone);
@@ -292,6 +307,63 @@ def delete_fact(fact_id: int, db_path: str | None = None) -> None:
         )
         if cur.rowcount == 0:
             raise NotFoundError(f"no live fact {fact_id} to delete")
+
+
+# --- episodes ----------------------------------------------------------------
+
+
+def insert_episode(
+    *,
+    person_id: int,
+    text: str,
+    embedding: bytes,
+    turn_id: int | None = None,
+    db_path: str | None = None,
+) -> int:
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO episodes (person_id, text, embedding, turn_id, created_ts)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (person_id, text, embedding, turn_id, utc_now_iso()),
+        )
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+
+def list_episodes(
+    person_id: int,
+    *,
+    include_deleted: bool = False,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Every live episode for a person, embeddings included.
+
+    Loading them all is deliberate: search ranks in Python, so it needs the
+    whole candidate set. See memory/episodic.py for why that is affordable.
+    """
+    sql = "SELECT * FROM episodes WHERE person_id = ?"
+    if not include_deleted:
+        sql += " AND deleted_ts = ''"
+    sql += " ORDER BY id"
+    with transaction(db_path) as conn:
+        return _rows(conn.execute(sql, (person_id,)))
+
+
+def get_episode(episode_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    with transaction(db_path) as conn:
+        return _row(conn.execute("SELECT * FROM episodes WHERE id = ?", (episode_id,)))
+
+
+def delete_episode(episode_id: int, db_path: str | None = None) -> None:
+    """Tombstone an episode. Raises on an unknown or already-deleted id, for the
+    same reason delete_fact does."""
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE episodes SET deleted_ts = ? WHERE id = ? AND deleted_ts = ''",
+            (utc_now_iso(), episode_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no live episode {episode_id} to delete")
 
 
 # --- turns -------------------------------------------------------------------

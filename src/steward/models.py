@@ -66,6 +66,18 @@ class FactKind:
     ALL = (IDENTITY, PREFERENCE, CONSTRAINT, SCHEDULE, MOOD, GOAL, SUPPLY)
 
 
+class Speaker:
+    """Who said a turn.
+
+    Only PERSON turns become episodes. An agent that embeds its own output
+    starts recalling its own guesses as though the person had said them, and
+    every round of that makes the memory more confident and less true.
+    """
+
+    PERSON = "person"
+    STEWARD = "steward"
+
+
 class Trigger:
     """Why the agent ran. Audit rows are grouped by this."""
 
