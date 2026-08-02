@@ -336,3 +336,56 @@ def test_the_spenders_page_carries_no_approval_panel(
     assert "hand soap" not in ana
     assert 'id="pending"' in rae
     assert "Approve" in rae
+
+
+def test_a_payment_link_gets_a_code_to_scan(db: str, household: tuple[int, int]) -> None:
+    """The link is the spender's, and their passkey is on their phone — so a
+    spender reading it on a laptop cannot use it. The code sits beside the URL
+    rather than replacing it."""
+    from steward.web.console import payment_qr
+
+    code = payment_qr(
+        "Soap is approved. Finish it here:\n"
+        "https://sandbox.collect.prava.space?session=ses_01KZ254RX3TJ1RRAN4FRSGE5C8"
+    )
+
+    assert code.startswith("data:image/svg+xml")
+
+
+def test_nothing_else_gets_a_code(db: str, household: tuple[int, int]) -> None:
+    """A QR is an instruction to point a camera at something. This page offers
+    that only for the one link it knows is a payment."""
+    from steward.web.console import payment_qr
+
+    assert payment_qr("here are three options from Everyday Goods") == ""
+    assert payment_qr("see https://everyday.fixture.example/soap") == ""
+
+
+def test_the_url_in_the_code_is_the_one_pay_warden_sent(
+    db: str, household: tuple[int, int]
+) -> None:
+    """Never invented, only matched out of a message the policy engine produced."""
+    from steward.web.console import _PAYMENT_URL
+
+    body = "Finish it here: https://sandbox.collect.prava.space?session=ses_abc123."
+    found = _PAYMENT_URL.search(body)
+
+    assert found is not None
+    assert found.group(0).rstrip(".") == "https://sandbox.collect.prava.space?session=ses_abc123"
+
+
+def test_the_code_survives_the_clients_redraw(db: str, household: tuple[int, int]) -> None:
+    """The thread is rebuilt from /state on every poll, so anything only in the
+    server's HTML lasts exactly until the first refresh. It briefly did."""
+    _, spender = household
+    console = console_for(db)
+    console._append(
+        spender,
+        "steward",
+        "Approved. Finish it here: https://sandbox.collect.prava.space?session=ses_1",
+        inbound=False,
+    )
+
+    row = console.transcript(spender)[0]
+
+    assert row["qr"].startswith("data:image/svg+xml")

@@ -284,6 +284,12 @@ STYLESHEET += """
 .acts .yes { border-color: var(--good-line); color: var(--good-ink); background: var(--good-bg); }
 .acts .no { border-color: var(--line-strong); }
 .thinking { color: var(--ink-faint); font-size: .875rem; padding: 0 16px 12px; }
+/* Beside the payment link, never instead of it: whoever is reading on a laptop
+   still needs the URL, and whoever has only a phone needs the code. */
+.pay { margin: 10px 0 0; }
+.pay img { width: 132px; height: 132px; display: block;
+           background: #fff; padding: 8px; border-radius: 8px; }
+.pay figcaption { margin-top: 6px; font-size: .75rem; color: var(--ink-faint); }
 """
 
 # --- handsets -----------------------------------------------------------------
