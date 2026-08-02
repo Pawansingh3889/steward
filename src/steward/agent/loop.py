@@ -25,6 +25,7 @@ import httpx
 from .. import config, store
 from ..memory import episodic
 from ..models import Speaker, Trigger
+from ..spend.warden import Warden
 from . import llm
 from .privacy import Redactor
 from .tools import ToolBox
@@ -82,6 +83,7 @@ def run(
     trigger: str = Trigger.ASK,
     record: bool = True,
     http: httpx.Client | None = None,
+    warden: Warden | None = None,
 ) -> dict[str, Any]:
     """One full agent conversation. Returns the redacted answer, the evidence
     trail, any memory writes, and usage — everything already safe to display.
@@ -111,7 +113,9 @@ def run(
         model=model,
         db_path=db_path,
     )
-    box = ToolBox(person_id=person_id, redactor=redactor, db_path=db_path, run_id=run_id)
+    box = ToolBox(
+        person_id=person_id, redactor=redactor, db_path=db_path, run_id=run_id, warden=warden
+    )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": safe_question},

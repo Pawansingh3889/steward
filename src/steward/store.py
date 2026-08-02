@@ -90,6 +90,27 @@ CREATE TABLE IF NOT EXISTS episodes (
   -- Tombstoned like facts, and for the same promise.
   deleted_ts TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS escalations (
+  id INTEGER PRIMARY KEY,
+  spender_id INTEGER NOT NULL REFERENCES people(id),
+  sponsor_id INTEGER NOT NULL REFERENCES people(id),
+  -- pay-warden's own id for the parked attempt. This is the handle the sponsor's
+  -- approval is replayed against, so it is the one field here that must survive
+  -- exactly; everything else is a copy kept for display.
+  attempt_id TEXT NOT NULL,
+  description TEXT NOT NULL,
+  merchant_name TEXT NOT NULL DEFAULT '',
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  -- Why policy parked it, verbatim from pay-warden. Shown to the sponsor
+  -- unedited: the rule that fired is the reason they are being asked at all.
+  rule_id TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  payment_url TEXT NOT NULL DEFAULT '',
+  created_ts TEXT NOT NULL,
+  decided_ts TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY,
   person_id INTEGER NOT NULL DEFAULT 0,
@@ -126,6 +147,8 @@ CREATE INDEX IF NOT EXISTS idx_episodes_person ON episodes(person_id, deleted_ts
 CREATE INDEX IF NOT EXISTS idx_turns_person ON turns(person_id, ts);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_ts ON agent_runs(ts);
 CREATE INDEX IF NOT EXISTS idx_people_phone ON people(phone);
+CREATE INDEX IF NOT EXISTS idx_escalations_sponsor ON escalations(sponsor_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_attempt ON escalations(attempt_id);
 """
 
 _initialized: set[str] = set()
@@ -491,6 +514,126 @@ def shared_turns(person_id: int, db_path: str | None = None) -> list[dict[str, A
                 (person_id,),
             )
         )
+
+
+# --- escalations ---------------------------------------------------------------
+
+
+def insert_escalation(
+    *,
+    spender_id: int,
+    sponsor_id: int,
+    attempt_id: str,
+    description: str,
+    amount_cents: int,
+    currency: str,
+    merchant_name: str = "",
+    rule_id: str = "",
+    reason: str = "",
+    db_path: str | None = None,
+) -> int:
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO escalations (spender_id, sponsor_id, attempt_id, description,"
+            " merchant_name, amount_cents, currency, rule_id, reason, created_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                spender_id,
+                sponsor_id,
+                attempt_id,
+                description,
+                merchant_name,
+                amount_cents,
+                currency,
+                rule_id,
+                reason,
+                utc_now_iso(),
+            ),
+        )
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+
+def get_escalation(escalation_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    with transaction(db_path) as conn:
+        return _row(conn.execute("SELECT * FROM escalations WHERE id = ?", (escalation_id,)))
+
+
+def escalation_by_attempt(attempt_id: str, db_path: str | None = None) -> dict[str, Any] | None:
+    with transaction(db_path) as conn:
+        return _row(conn.execute("SELECT * FROM escalations WHERE attempt_id = ?", (attempt_id,)))
+
+
+def list_escalations(
+    *,
+    sponsor_id: int | None = None,
+    spender_id: int | None = None,
+    status: str = "",
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM escalations WHERE 1=1"
+    params: list[Any] = []
+    if sponsor_id is not None:
+        sql += " AND sponsor_id = ?"
+        params.append(sponsor_id)
+    if spender_id is not None:
+        sql += " AND spender_id = ?"
+        params.append(spender_id)
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY id DESC"
+    with transaction(db_path) as conn:
+        return _rows(conn.execute(sql, tuple(params)))
+
+
+def decide_escalation(
+    escalation_id: int,
+    *,
+    status: str,
+    payment_url: str = "",
+    db_path: str | None = None,
+) -> None:
+    """Move a pending escalation to approved or declined, exactly once.
+
+    The `status = 'pending'` in the WHERE clause is the whole point: two sponsors
+    tapping approve at the same moment, or one tapping twice, must not mint two
+    payment sessions for one request. Whoever loses the race gets a
+    NotFoundError, which the caller turns into "already decided" rather than a
+    second charge.
+    """
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE escalations SET status = ?, payment_url = ?, decided_ts = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (status, payment_url, utc_now_iso(), escalation_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no pending escalation {escalation_id} to decide")
+
+
+def reopen_escalation(escalation_id: int, db_path: str | None = None) -> None:
+    """Put a decision back, when the action it authorised did not happen.
+
+    Only ever called after an approval that failed to release. A sponsor whose
+    approval silently bought nothing is worse off than one who has to tap twice.
+    """
+    with transaction(db_path) as conn:
+        conn.execute(
+            "UPDATE escalations SET status = 'pending', decided_ts = '' WHERE id = ?",
+            (escalation_id,),
+        )
+
+
+def set_escalation_payment_url(
+    escalation_id: int, payment_url: str, db_path: str | None = None
+) -> None:
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE escalations SET payment_url = ? WHERE id = ?", (payment_url, escalation_id)
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no escalation {escalation_id}")
 
 
 # --- agent audit -------------------------------------------------------------

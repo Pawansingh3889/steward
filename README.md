@@ -15,9 +15,8 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 2 of 8. The agent answers from memory, you can correct it, and it can
-read a calendar or a bank alert without any of it leaving the machine. Nothing
-spends money yet.
+Phase 3 of 8. A purchase can be blocked, escalated to the sponsor, approved and
+paid — with policy, not steward, deciding at every step.
 
 ```
 $ steward memory list --person 2
@@ -90,6 +89,43 @@ The local model is also the one component that sees unredacted text, so
 `OLLAMA_BASE` is checked: a non-loopback host is refused unless you opt in
 explicitly, and the error says exactly what you would be agreeing to.
 
+## Steward never decides whether a purchase is allowed
+
+Permission belongs to [pay-warden](../pay-warden): a separate process, reached
+over MCP stdio, evaluating a YAML policy the sponsor wrote. It holds the Prava
+credentials, so a bug in steward's reasoning cannot reach them, and it is pinned
+to `mcp` 1.x while this is on 2.x — the protocol is the contract between them
+rather than a shared import. *(Verified against the real subprocess, not a
+stub: `tests/test_warden_integration.py`.)*
+
+Three outcomes, and the middle one is why this product exists:
+
+```
+$ steward spend preview --description "hand soap" --amount-cents 450 …
+  allowed  [pass]
+  All policy rules passed
+
+$ steward spend preview --description "winter coat" --amount-cents 2500 …
+  needs_approval  [human-approval]
+  25 GBP exceeds auto-approval threshold 20.00 GBP; a human must release it
+```
+
+A parked purchase writes an escalation for the sponsor, who sees it with
+`steward approvals list` and releases it with `approve`. The spender was not
+refused; they are waiting. A denial is relayed **verbatim with the rule that
+fired** — an agent that editorialises "over your limit" into "I couldn't find
+that" teaches people the system is broken rather than that a limit exists.
+
+The model can request. It cannot approve: there is no approval tool, only a CLI
+command the sponsor runs. An agent able to release its own escalations would
+make the policy a suggestion.
+
+Two things fail closed. An unrecognised verdict is never read as permission,
+and a policy engine that cannot be reached is not permission either. Relatedly,
+**enrolling someone in steward is not enough to let them spend** — they must
+also appear in pay-warden's policy as `steward:person_<id>`, or every request is
+denied with `unknown-agent`. Surprising the first time; correct.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -125,6 +161,9 @@ src/steward/
     embed.py       local, dependency-free vectors
     episodic.py    what was said, searchable by resemblance
     recall.py      "what do you know about me?", answered once for all surfaces
+  spend/
+    warden.py      the MCP client to pay-warden; the only path to money
+    purchase.py    blocked / escalated / approved / paid
   agent/
     llm.py         the one place this system talks to OpenAI
     privacy.py     pseudonyms + denylist, rebuilt per run

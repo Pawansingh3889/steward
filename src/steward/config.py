@@ -110,6 +110,17 @@ def pay_warden_command() -> list[str]:
     return [command, *_str("PAY_WARDEN_ARGS").split()]
 
 
+def pay_warden_cwd() -> str | None:
+    """Directory to launch pay-warden in.
+
+    It resolves its policy file and audit database relative to its own working
+    directory, so launching it from steward's would hand it a missing policy —
+    and a policy engine that cannot find its policy is the one component here
+    that must never start up degraded. Empty means inherit ours.
+    """
+    return _str("PAY_WARDEN_CWD") or None
+
+
 def secret_values() -> tuple[str, ...]:
     """Literal strings that must never reach the model. Read live rather than
     cached, so rotating a key cannot leave a stale value unprotected."""

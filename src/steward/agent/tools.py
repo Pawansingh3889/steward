@@ -19,6 +19,8 @@ from typing import Any
 from .. import store
 from ..memory import recall
 from ..models import FactKind
+from ..spend import purchase
+from ..spend.warden import Warden, WardenError
 from .privacy import Redactor
 
 MAX_FACT_VALUE = 500  # a fact is a fact, not an essay
@@ -77,6 +79,29 @@ SPECS: list[dict[str, Any]] = [
         {"limit": {"type": "integer", "description": "how many turns, default 20"}},
     ),
     _spec(
+        "request_purchase",
+        "Buy something for the person. Policy decides, not you: the answer is"
+        " 'allowed' (a payment link comes back and they tap their passkey),"
+        " 'needs_approval' (their sponsor has been asked — tell them it is"
+        " waiting, NOT that it failed), or 'denied' (relay the reason as given"
+        " and do not soften it). Amounts are integer minor units: 1250 is"
+        " £12.50. Only request what the person actually asked for.",
+        {
+            "description": {
+                "type": "string",
+                "description": "what is being bought, in plain words",
+            },
+            "amount_cents": {
+                "type": "integer",
+                "description": "integer minor units, e.g. 1250 for £12.50",
+            },
+            "currency": {"type": "string", "description": "ISO code, e.g. GBP"},
+            "merchant_name": {"type": "string"},
+            "merchant_url": {"type": "string"},
+            "merchant_country": {"type": "string", "description": "two-letter code, e.g. GB"},
+        },
+    ),
+    _spec(
         "search_memory",
         "Search things the person has said in the past, by resemblance. Use it"
         " for context and colour — 'you mentioned this before'. Do NOT use it as"
@@ -107,6 +132,9 @@ class ToolBox:
     redactor: Redactor
     db_path: str | None = None
     run_id: int = 0
+    # Injected in tests so the suite never spawns pay-warden; None means the
+    # real subprocess over MCP stdio.
+    warden: Warden | None = None
     # What the run actually did, for the caller to display and audit.
     writes_log: list[dict[str, Any]] = field(default_factory=list)
 
@@ -181,6 +209,51 @@ class ToolBox:
         )
         self.writes_log.append({"action": "remember", "kind": kind, "key": key})
         return {"fact_id": fact_id, "stored": True, "kind": kind, "key": key}
+
+    def _tool_request_purchase(
+        self,
+        description: str = "",
+        amount_cents: int = 0,
+        currency: str = "GBP",
+        merchant_name: str = "",
+        merchant_url: str = "",
+        merchant_country: str = "GB",
+    ) -> dict[str, Any]:
+        """Ask pay-warden for money. Note what is absent: any tool to approve.
+
+        The agent can request and can report, but only the sponsor can release
+        a parked attempt — and they do it through the CLI, not through anything
+        the model can reach. An agent able to approve its own escalations would
+        make the sponsor's policy a suggestion.
+        """
+        if not description or amount_cents <= 0:
+            return {"error": "description and a positive amount_cents are required"}
+        if not merchant_name or not merchant_url:
+            return {"error": "merchant_name and merchant_url are required"}
+        try:
+            outcome = purchase.buy(
+                person_id=self.person_id,
+                description=description,
+                amount_cents=int(amount_cents),
+                currency=currency,
+                merchant_name=merchant_name,
+                merchant_url=merchant_url,
+                merchant_country=merchant_country,
+                db_path=self.db_path,
+                client=self.warden,
+            )
+        except (purchase.PurchaseError, WardenError) as exc:
+            # A policy engine that cannot be reached is not permission to spend.
+            return {"error": str(exc), "verdict": "unavailable"}
+        self.writes_log.append(
+            {
+                "action": "purchase",
+                "verdict": outcome["verdict"],
+                "description": description,
+                "amount_cents": amount_cents,
+            }
+        )
+        return outcome
 
     def _tool_forget_fact(self, fact_id: int = 0) -> dict[str, Any]:
         row = store.get_fact(int(fact_id), db_path=self.db_path)

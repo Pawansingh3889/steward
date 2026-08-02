@@ -23,6 +23,8 @@ from .extract import pipeline
 from .extract.base import INFERRED
 from .memory import recall
 from .models import FactKind, Role
+from .spend import purchase, warden
+from .spend.warden import WardenError
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 
@@ -239,6 +241,96 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- spending ----------------------------------------------------------------
+
+
+def cmd_spend_preview(args: argparse.Namespace) -> int:
+    """Ask policy what it *would* say. Nothing is minted and nothing recorded.
+
+    There is deliberately no `spend request` command. The real path runs through
+    the agent, where it is attached to something a person actually asked for —
+    a CLI flag that mints a live payment session is too easy to fire by accident
+    against a finite sandbox budget.
+    """
+    person = _resolve_person(args)
+    try:
+        decision = warden.preview(
+            person_id=int(person["id"]),
+            description=args.description,
+            amount_cents=args.amount_cents,
+            currency=args.currency,
+            merchant_name=args.merchant_name,
+            merchant_url=args.merchant_url,
+            merchant_country=args.merchant_country,
+        )
+    except WardenError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _out(json.dumps(decision.as_dict(), indent=2))
+        return 0
+    _out(f"\n  {BOLD}{decision.verdict}{RESET}  [{decision.rule_id}]")
+    _out(f"  {DIM}{decision.reason}{RESET}\n")
+    return 0 if decision.allowed else 1
+
+
+# --- approvals ---------------------------------------------------------------
+
+
+def _money(amount_cents: int, currency: str) -> str:
+    symbol = {"GBP": "£", "USD": "$", "EUR": "€"}.get(currency, "")
+    return f"{symbol}{amount_cents / 100:,.2f} {currency}".strip()
+
+
+def cmd_approvals_list(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    waiting = purchase.pending_for_sponsor(int(person["id"]), db_path=args.db)
+    if args.json:
+        _out(json.dumps(waiting, indent=2))
+        return 0
+    if not waiting:
+        _out("nothing waiting on you.")
+        return 0
+    _out(f"\n{BOLD}waiting for {person['name']}{RESET}\n")
+    for row in waiting:
+        spender = store.get_person(int(row["spender_id"]), db_path=args.db)
+        who = spender["name"] if spender else f"person {row['spender_id']}"
+        _out(
+            f"  {row['id']:>4}  {who} wants {row['description']}"
+            f"  {BOLD}{_money(int(row['amount_cents']), str(row['currency']))}{RESET}"
+        )
+        if row["merchant_name"]:
+            _out(f"        {DIM}from {row['merchant_name']}{RESET}")
+        # The rule that fired is the reason they are being asked at all, so it
+        # is shown exactly as the policy engine worded it.
+        _out(f"        {DIM}policy: {row['reason']}  [{row['rule_id']}]{RESET}")
+    _out(f"\n{DIM}steward approvals approve --id N   ·   or decline --id N{RESET}\n")
+    return 0
+
+
+def cmd_approvals_approve(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        result = purchase.approve(int(args.id), sponsor_id=int(person["id"]), db_path=args.db)
+    except (purchase.PurchaseError, WardenError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(
+        f"approved: {result['description']} — {_money(result['amount_cents'], result['currency'])}"
+    )
+    _out(f"\n  {BOLD}{result['payment_url']}{RESET}")
+    _out(f"\n{DIM}they complete it with their passkey. Nothing is charged until they do.{RESET}")
+    return 0
+
+
+def cmd_approvals_decline(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        result = purchase.decline(int(args.id), sponsor_id=int(person["id"]), db_path=args.db)
+    except purchase.PurchaseError as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"declined: {result['description']}")
+    return 0
+
+
 # --- ask ---------------------------------------------------------------------
 
 
@@ -328,6 +420,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-local-model", action="store_true", help="deterministic parsers only"
     )
     ingesting.set_defaults(func=cmd_ingest)
+
+    spending = sub.add_parser("spend", help="check what policy would say")
+    spending_sub = spending.add_subparsers(dest="spend_command", required=True)
+    previewing = spending_sub.add_parser(
+        "preview", help="dry-run a purchase against policy; mints nothing"
+    )
+    _add_person_flags(previewing)
+    previewing.add_argument("--description", required=True)
+    previewing.add_argument("--amount-cents", type=int, required=True, dest="amount_cents")
+    previewing.add_argument("--currency", default="GBP")
+    previewing.add_argument("--merchant-name", required=True, dest="merchant_name")
+    previewing.add_argument("--merchant-url", required=True, dest="merchant_url")
+    previewing.add_argument("--merchant-country", default="GB", dest="merchant_country")
+    previewing.set_defaults(func=cmd_spend_preview)
+
+    approvals = sub.add_parser("approvals", help="purchases waiting on a sponsor")
+    approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)
+
+    waiting = approvals_sub.add_parser("list", help="what is waiting on you")
+    _add_person_flags(waiting)
+    waiting.set_defaults(func=cmd_approvals_list)
+
+    approving = approvals_sub.add_parser("approve", help="release a parked purchase")
+    _add_person_flags(approving)
+    approving.add_argument("--id", type=int, required=True, help="escalation id")
+    approving.set_defaults(func=cmd_approvals_approve)
+
+    declining = approvals_sub.add_parser("decline", help="refuse a parked purchase")
+    _add_person_flags(declining)
+    declining.add_argument("--id", type=int, required=True, help="escalation id")
+    declining.set_defaults(func=cmd_approvals_decline)
 
     asking = sub.add_parser("ask", help="ask the agent something")
     _add_person_flags(asking)
