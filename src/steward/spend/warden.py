@@ -52,6 +52,19 @@ class WardenError(RuntimeError):
     """pay-warden could not be reached, or answered something unusable."""
 
 
+class EmptyResponse(WardenError):
+    """pay-warden answered with no content at all.
+
+    Its own type because it means two different things depending on the tool.
+    From `preview`, `request` or `release` it is a broken answer and must stay
+    fatal — silence is not permission. From a tool that returns a *list*, it is
+    how "nothing to report" arrives: FastMCP ships one content block per item,
+    so an empty list serialises to no blocks and is indistinguishable, at this
+    layer, from no reply. Only a caller that knows it asked for a list can tell
+    them apart, so only such a caller may catch this.
+    """
+
+
 def amount_to_decimal(minor_units: int) -> str:
     """Integer minor units to pay-warden's decimal string. The only place the
     two representations meet, so rounding can only ever be wrong here."""
@@ -144,6 +157,11 @@ class StdioWarden:
             except WardenError:
                 raise
             except Exception as exc:
+                # Raised while reading a reply rather than while getting one:
+                # re-raise it as itself. anyio has wrapped it in a task group by
+                # now, so the bare `except WardenError` above never sees it.
+                if (inner := _warden_error_in(exc)) is not None:
+                    raise inner from exc
                 # Spawn failure, transport error, protocol mismatch: to a caller
                 # deciding whether it may spend, these are all the same answer.
                 raise WardenError(
@@ -168,6 +186,26 @@ class StdioWarden:
             await session.initialize()
             result = await session.call_tool(tool, arguments, read_timeout_seconds=CALL_TIMEOUT)
             return _unwrap(result)
+
+
+def _warden_error_in(exc: BaseException, depth: int = 0) -> WardenError | None:
+    """The WardenError inside an anyio ExceptionGroup, if there is one.
+
+    Same wrapping `_because` exists for, applied to the *type* rather than the
+    message. Without this, an error raised while reading a reply — pay-warden
+    reporting a tool error, unparseable content, an empty response — comes back
+    as "could not reach pay-warden", which is false: it was reached, and it
+    answered. It also loses the exception's own class, which is what lets
+    `audit_log` tell an empty list from a broken engine.
+    """
+    if isinstance(exc, WardenError):
+        return exc
+    inner = getattr(exc, "exceptions", None)
+    if inner and depth < 5:
+        for item in inner:
+            if (found := _warden_error_in(item, depth + 1)) is not None:
+                return found
+    return None
 
 
 def _because(exc: BaseException, depth: int = 0) -> str:
@@ -272,7 +310,7 @@ def _unwrap(result: Any) -> Any:
         return structured.get("result", structured)
     text = _text(result)
     if not text:
-        raise WardenError("pay-warden returned an empty response")
+        raise EmptyResponse("pay-warden returned an empty response")
     try:
         return json.loads(text)
     except ValueError as exc:
@@ -401,5 +439,11 @@ def audit_log(*, person_id: int | None = None, limit: int = 20, warden: Warden |
     arguments: dict[str, Any] = {"limit": limit}
     if person_id is not None:
         arguments["agent"] = agent_name(person_id)
-    result = client.call("get_audit_log", arguments)
+    try:
+        result = client.call("get_audit_log", arguments)
+    except EmptyResponse:
+        # Somebody who has never bought anything, not a broken engine. Caught
+        # here and nowhere else: this is the only call that asks for a list, and
+        # so the only one that can read silence as "none". See EmptyResponse.
+        return []
     return result if isinstance(result, list) else []

@@ -9,6 +9,8 @@ engine is unreachable.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from steward import cli, store
@@ -546,3 +548,78 @@ def test_the_agent_has_no_refund_tool(db: str, household) -> None:
 
     names = {spec["function"]["name"] for spec in box.specs()}
     assert not any("refund" in name or "dispute" in name for name in names)
+
+
+# --- the audit log ------------------------------------------------------------
+
+
+class _NoContent:
+    """What FastMCP returns for a tool whose list came back empty.
+
+    One content block per item means zero items is zero blocks — which at the
+    transport layer is indistinguishable from no reply at all.
+    """
+
+    isError = False
+    structuredContent = None
+    content: ClassVar[list[object]] = []
+
+
+def test_an_empty_audit_log_is_not_an_unreachable_engine() -> None:
+    """Somebody who has never bought anything must not read as a broken policy
+    engine. The ledger surface showed this immediately: every household with no
+    history rendered "pay-warden could not be reached"."""
+
+    class Silent:
+        def call(self, tool: str, arguments: dict) -> object:
+            from steward.spend.warden import _unwrap
+
+            return _unwrap(_NoContent())
+
+    assert warden.audit_log(person_id=2, warden=Silent()) == []
+
+
+def test_an_empty_reply_to_a_purchase_is_still_a_failure(
+    db: str, household: tuple[int, int]
+) -> None:
+    """The other half, and the one that matters: silence is not permission.
+    Only a caller that asked for a *list* may read no content as "none"."""
+    _, spender = household
+
+    class Silent:
+        def call(self, tool: str, arguments: dict) -> object:
+            from steward.spend.warden import _unwrap
+
+            return _unwrap(_NoContent())
+
+    with pytest.raises(warden.WardenError, match="empty response"):
+        purchase.buy(person_id=spender, **SOAP, db_path=db, client=Silent())
+
+
+def test_the_audit_log_is_always_asked_about_one_person() -> None:
+    """pay-warden's audit database is shared by every agent it has answered for,
+    so an unfiltered read crosses households."""
+    stub = WardenStub([[]])
+
+    warden.audit_log(person_id=7, warden=stub)
+
+    assert stub.last("get_audit_log")["agent"] == warden.agent_name(7)
+
+
+def test_an_error_from_reading_a_reply_survives_anyios_task_group() -> None:
+    """anyio wraps whatever a task raised in an ExceptionGroup, so the bare
+    `except WardenError` in `StdioWarden.call` never sees one raised while
+    parsing pay-warden's answer.
+
+    Two things were wrong without this. Such errors came back as "could not
+    reach pay-warden", which is false — it was reached, and it answered — and
+    the exception's own class was lost, which is what lets `audit_log` tell an
+    empty list from a broken engine.
+    """
+    from steward.spend.warden import EmptyResponse, _warden_error_in
+
+    inner = EmptyResponse("pay-warden returned an empty response")
+    wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [ExceptionGroup("inner", [inner])])
+
+    assert _warden_error_in(wrapped) is inner
+    assert _warden_error_in(ExceptionGroup("no wardens here", [ValueError("x")])) is None
