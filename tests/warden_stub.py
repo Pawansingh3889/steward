@@ -65,6 +65,12 @@ def denied(reason: str = "merchant is not on the allowlist") -> dict:
     }
 
 
+def refused(attempt_id: str = "att_1", reason: str = "over the single-purchase limit") -> dict:
+    """What `reject_purchase` answers. No session, and none can follow: the
+    attempt is no longer pending, which is the only state approve acts on."""
+    return {"attempt_id": attempt_id, "rejected": True, "note": "", "reason": reason}
+
+
 def released(attempt_id: str = "att_1", url: str = "https://pay.example/session/2") -> dict:
     return {
         "attempt_id": attempt_id,

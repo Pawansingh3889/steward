@@ -21,7 +21,7 @@ from steward.models import Role
 from steward.spend import purchase, warden
 
 from .agent_stub import OpenAIStub, completion
-from .warden_stub import WardenStub, allowed, denied, parked, released
+from .warden_stub import WardenStub, allowed, denied, parked, refused, released
 
 SOAP = {
     "description": "hand soap, 2 bottles",
@@ -158,17 +158,39 @@ def test_the_whole_flow(db: str, household: tuple[int, int]) -> None:
     assert store.get_escalation(blocked["escalation_id"], db_path=db)["status"] == "approved"
 
 
-def test_declining_never_touches_pay_warden(db: str, household: tuple[int, int]) -> None:
-    """An attempt it parked and nobody released simply stays parked, which is
-    already the correct state."""
+def test_declining_tells_pay_warden_so_the_two_sides_agree(
+    db: str, household: tuple[int, int]
+) -> None:
+    """Doing nothing was right while parked was pay-warden's only end state. It
+    now records a refusal, so silence would leave steward saying declined and
+    the engine still saying it is waiting — and the attempt releasable by
+    whoever approved it next."""
     sponsor, spender = household
-    stub = WardenStub([parked()])
+    stub = WardenStub([parked(), refused()])
     blocked = purchase.buy(person_id=spender, **SOAP, db_path=db, client=stub)
 
-    purchase.decline(blocked["escalation_id"], sponsor_id=sponsor, db_path=db)
+    purchase.decline(
+        blocked["escalation_id"], sponsor_id=sponsor, db_path=db, note="not this month", client=stub
+    )
 
-    assert stub.tools_called() == ["request_purchase"]
+    assert stub.tools_called() == ["request_purchase", "reject_purchase"]
+    assert stub.last("reject_purchase")["note"] == "not this month"
     assert store.get_escalation(blocked["escalation_id"], db_path=db)["status"] == "declined"
+
+
+def test_a_decline_the_engine_refuses_leaves_it_pending(
+    db: str, household: tuple[int, int]
+) -> None:
+    """The safe direction. The spender keeps waiting, but nothing was bought and
+    nothing was recorded that did not happen — and the sponsor can try again."""
+    sponsor, spender = household
+    stub = WardenStub([parked(), warden.WardenError("connection reset")])
+    blocked = purchase.buy(person_id=spender, **SOAP, db_path=db, client=stub)
+
+    with pytest.raises(warden.WardenError):
+        purchase.decline(blocked["escalation_id"], sponsor_id=sponsor, db_path=db, client=stub)
+
+    assert store.get_escalation(blocked["escalation_id"], db_path=db)["status"] == "pending"
 
 
 # --- the ways this could go wrong --------------------------------------------
@@ -388,9 +410,11 @@ def test_the_sponsor_cannot_see_another_households_escalations(
     assert "nothing waiting on you" in capsys.readouterr().out
 
 
-def test_declining_from_the_cli(db: str, household: tuple[int, int]) -> None:
+def test_declining_from_the_cli(db: str, household: tuple[int, int], monkeypatch) -> None:
     sponsor, spender = household
     blocked = purchase.buy(person_id=spender, **SOAP, db_path=db, client=WardenStub([parked()]))
+    # The CLI builds its own client, so the seam is patched rather than passed.
+    monkeypatch.setattr(warden, "reject", lambda *a, **k: "over the limit")
 
     assert (
         cli.main(
@@ -415,7 +439,9 @@ def test_approving_something_already_decided_fails_loudly(
 ) -> None:
     sponsor, spender = household
     blocked = purchase.buy(person_id=spender, **SOAP, db_path=db, client=WardenStub([parked()]))
-    purchase.decline(blocked["escalation_id"], sponsor_id=sponsor, db_path=db)
+    purchase.decline(
+        blocked["escalation_id"], sponsor_id=sponsor, db_path=db, client=WardenStub([refused()])
+    )
 
     with pytest.raises(SystemExit, match="already declined"):
         cli.main(

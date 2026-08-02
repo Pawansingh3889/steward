@@ -172,16 +172,36 @@ def decline(
     *,
     sponsor_id: int | None = None,
     db_path: str | None = None,
+    note: str = "",
+    client: Warden | None = None,
 ) -> dict[str, Any]:
-    """The sponsor says no. pay-warden is not called: an attempt it parked and
-    nobody released simply stays parked, which is already the correct state."""
+    """The sponsor says no, and pay-warden is told.
+
+    It used to be enough to record this locally: an attempt nobody released
+    stayed parked, which was the correct end state while parked was the only
+    end state pay-warden had. It now records a refusal, so staying quiet would
+    leave the two sides disagreeing — steward saying declined while the policy
+    engine still says it is waiting on somebody — and the attempt would remain
+    releasable by anyone who called approve on it later.
+
+    Same shape as `approve`: claim the transition in SQL first so a double tap
+    cannot send two refusals, and put it back if the call fails. Failing leaves
+    the escalation pending, which is the safe direction — the spender keeps
+    waiting, but nothing was bought and nothing was recorded that did not happen.
+    """
     escalation = _owned_escalation(escalation_id, sponsor_id, db_path)
     store.decide_escalation(escalation_id, status=DECLINED, db_path=db_path)
+    try:
+        warden.reject(str(escalation["attempt_id"]), note, warden=client)
+    except WardenError:
+        store.reopen_escalation(escalation_id, db_path=db_path)
+        raise
     return {
         "escalation_id": escalation_id,
         "status": DECLINED,
         "description": str(escalation["description"]),
         "spender_id": int(escalation["spender_id"]),
+        "note": note,
     }
 
 
