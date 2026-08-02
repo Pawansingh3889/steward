@@ -7,6 +7,8 @@ told, and audits all of it whatever happens.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from steward import store
@@ -360,3 +362,87 @@ def test_search_memory_returns_nothing_rather_than_the_least_bad_match(
         "episodes": [],
         "count": 0,
     }
+
+
+# --- what the model was sent -------------------------------------------------
+
+
+def test_a_run_records_what_the_model_was_sent(db: str, spender: int) -> None:
+    """The table and its writer both existed and nothing ever called one, so a
+    design that was there on paper stored nothing at all."""
+    model = OpenAIStub([completion(content="Noted.")])
+
+    result = loop.run("I'm out of soap", person_id=spender, db_path=db, http=model.client())
+
+    saved = store.get_agent_transcript(result["run_id"], db_path=db)
+    assert saved is not None
+    messages = json.loads(saved["messages"])
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+
+
+def test_the_transcript_holds_the_redacted_view_not_the_persons_words(
+    db: str, spender: int
+) -> None:
+    """`turns` keeps what they said, on their own machine, unredacted. This keeps
+    what the model was given — which is where other people are pseudonyms. Two
+    records, deliberately, so that answering "why did it decide that" never
+    needs a second copy of anybody's raw conversation."""
+    model = OpenAIStub([completion(content="Noted.")])
+
+    result = loop.run(
+        "Rae Whitfield asked me to get soap", person_id=spender, db_path=db, http=model.client()
+    )
+
+    sent = json.loads(store.get_agent_transcript(result["run_id"], db_path=db)["messages"])
+    to_model = " ".join(str(m.get("content") or "") for m in sent)
+    assert "Rae Whitfield" not in to_model
+    assert pseudonym(1) in to_model
+    # And the person's own words survive intact where they belong.
+    assert any("Rae Whitfield" in row["text"] for row in store.recent_turns(spender, db_path=db))
+
+
+def test_a_run_that_was_asked_not_to_be_remembered_stores_no_transcript(
+    db: str, spender: int
+) -> None:
+    """`record=False` means it. A caller that asked not to be remembered did not
+    mean "except the transcript"."""
+    model = OpenAIStub([completion(content="Noted.")])
+
+    result = loop.run(
+        "I'm out of soap", person_id=spender, db_path=db, http=model.client(), record=False
+    )
+
+    assert store.get_agent_transcript(result["run_id"], db_path=db) is None
+
+
+def test_forgetting_what_was_said_reaches_the_transcript_too(db: str, spender: int) -> None:
+    """The sentence is in both places. Tombstoning the episode and leaving the
+    transcript would make "forget that" true of memory and false of disk — the
+    half-deletion this whole project exists not to do."""
+    from steward.memory import recall
+
+    model = OpenAIStub([completion(content="Noted.")])
+    result = loop.run("I'm out of soap", person_id=spender, db_path=db, http=model.client())
+    episode = store.list_episodes(spender, db_path=db)[0]
+    assert store.get_agent_transcript(result["run_id"], db_path=db) is not None
+
+    recall.forget(recall.EPISODE, int(episode["id"]), person_id=spender, db_path=db)
+
+    assert store.get_agent_transcript(result["run_id"], db_path=db) is None
+    assert store.list_agent_transcripts(spender, db_path=db) == []
+
+
+def test_forgetting_one_run_leaves_the_others(db: str, spender: int) -> None:
+    """A tombstone is for the thing asked about, not the conversation."""
+    from steward.memory import recall
+
+    model = OpenAIStub([completion(content="ok"), completion(content="ok")])
+    first = loop.run("out of soap", person_id=spender, db_path=db, http=model.client())
+    second = loop.run("out of rice", person_id=spender, db_path=db, http=model.client())
+    soap = next(e for e in store.list_episodes(spender, db_path=db) if "soap" in e["text"])
+
+    recall.forget(recall.EPISODE, int(soap["id"]), person_id=spender, db_path=db)
+
+    assert store.get_agent_transcript(first["run_id"], db_path=db) is None
+    assert store.get_agent_transcript(second["run_id"], db_path=db) is not None

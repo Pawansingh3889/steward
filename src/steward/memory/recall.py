@@ -87,6 +87,14 @@ def search(
     return [episodic.as_dict(episode) for episode in found]
 
 
+def _forget_transcript_behind(episode: dict[str, Any] | None, db_path: str | None) -> None:
+    if not episode or not episode.get("turn_id"):
+        return
+    turn = store.get_turn(int(episode["turn_id"]), db_path=db_path)
+    if turn and turn["run_id"]:
+        store.delete_agent_transcripts_for_run(int(turn["run_id"]), db_path=db_path)
+
+
 def forget(
     kind: str,
     item_id: int,
@@ -119,6 +127,13 @@ def forget(
         row = store.get_episode(item_id, db_path=db_path)
         remove = store.delete_episode
         label = str(row["text"])[:60] if row else ""
+        # The same sentence is in the transcript of the run that produced it,
+        # in the redacted form the model was sent. Tombstoning the episode and
+        # leaving that behind would make "forget that" true of memory and false
+        # of disk, which is the kind of half-deletion this project exists to
+        # not do. Episodes written outside a run carry turn_id 0 and have no
+        # transcript to reach.
+        _forget_transcript_behind(row, db_path)
 
     if row is None or (person_id is not None and int(row["person_id"]) != person_id):
         raise store.NotFoundError(f"no {kind} {item_id} belonging to you")
