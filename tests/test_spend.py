@@ -428,3 +428,121 @@ def test_approving_something_already_decided_fails_loudly(
                 str(blocked["escalation_id"]),
             ]
         )
+
+
+# --- refunds -----------------------------------------------------------------
+
+
+def test_a_refund_must_point_at_a_purchase_that_happened(db: str, household) -> None:
+    from steward.spend import refund
+
+    _, spender = household
+    with pytest.raises(refund.RefundError, match="purchase that happened"):
+        refund.request(
+            person_id=spender,
+            attempt_id="",
+            description="soap",
+            amount_cents=450,
+            reason="never arrived",
+            db_path=db,
+        )
+
+
+def test_a_refund_needs_a_reason(db: str, household) -> None:
+    from steward.spend import refund
+
+    _, spender = household
+    with pytest.raises(refund.RefundError, match="not a request"):
+        refund.request(
+            person_id=spender,
+            attempt_id="att_1",
+            description="soap",
+            amount_cents=450,
+            reason="   ",
+            db_path=db,
+        )
+
+
+def test_the_reason_is_stored_verbatim(db: str, household) -> None:
+    """A model must not summarise a complaint: the paraphrase is a different
+    complaint, and this is the text a merchant might eventually read."""
+    from steward.spend import refund
+
+    _, spender = household
+    words = "arrived leaking and the box was soaked through"
+    result = refund.request(
+        person_id=spender,
+        attempt_id="att_1",
+        description="soap",
+        amount_cents=450,
+        reason=words,
+        db_path=db,
+    )
+
+    assert store.get_refund(result["refund_id"], db_path=db)["reason"] == words
+
+
+def test_steward_says_it_has_not_contacted_anybody(db: str, household) -> None:
+    """Somebody who thinks a claim has been filed will not chase it themselves."""
+    from steward.spend import refund
+
+    _, spender = household
+    result = refund.request(
+        person_id=spender,
+        attempt_id="att_1",
+        description="soap",
+        amount_cents=450,
+        reason="never arrived",
+        db_path=db,
+    )
+
+    assert "has not contacted the merchant" in result["note"]
+
+
+def test_a_refund_is_resolved_once(db: str, household) -> None:
+    from steward.spend import refund
+
+    _, spender = household
+    made = refund.request(
+        person_id=spender,
+        attempt_id="att_1",
+        description="soap",
+        amount_cents=450,
+        reason="never arrived",
+        db_path=db,
+    )
+
+    refund.resolve(made["refund_id"], person_id=spender, refunded=True, db_path=db)
+    with pytest.raises(store.NotFoundError):
+        refund.resolve(made["refund_id"], person_id=spender, refunded=False, db_path=db)
+
+
+def test_another_persons_refund_is_out_of_reach(db: str, household) -> None:
+    from steward.spend import refund
+
+    _, spender = household
+    stranger = store.insert_person(name="Someone Else", role=Role.SPENDER, db_path=db)
+    theirs = refund.request(
+        person_id=stranger,
+        attempt_id="att_9",
+        description="soap",
+        amount_cents=450,
+        reason="never arrived",
+        db_path=db,
+    )
+
+    with pytest.raises(refund.RefundError, match="belonging to you"):
+        refund.resolve(theirs["refund_id"], person_id=spender, refunded=True, db_path=db)
+
+
+def test_the_agent_has_no_refund_tool(db: str, household) -> None:
+    """Asking for money back is a claim in somebody's name. It stays a person's
+    act, like every other authority-bearing thing here."""
+    from steward.agent.privacy import Redactor
+    from steward.agent.tools import ToolBox
+
+    _, spender = household
+    box = ToolBox(person_id=spender, redactor=Redactor.build(db_path=db), db_path=db)
+
+    names = {spec["function"]["name"] for spec in box.specs()}
+    assert not any("refund" in name or "dispute" in name for name in names)

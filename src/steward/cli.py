@@ -30,7 +30,7 @@ from .memory import recall
 from .models import FactKind, Role, money
 from .plan import goals, schedule
 from .plan.schedule import PlanError
-from .spend import grant, purchase, warden
+from .spend import grant, purchase, refund, warden
 from .spend.warden import WardenError
 from .surface.base import Inbound, RecordingChannel
 from .surface.linq import LinqChannel
@@ -661,6 +661,110 @@ def cmd_price(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- evaluation ----------------------------------------------------------------
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    """Run the whole evaluation and print it, caveats included."""
+    from .evaluation import report as evaluation
+
+    points = evaluation.sweep()
+    converged = evaluation.converges_with_no_advantage()
+    if args.json:
+        _out(evaluation.as_json(points))
+        return 0
+
+    _out(f"\n{BOLD}does steward make anyone better off?{RESET}")
+    _out(f"{DIM}primary metric, fixed before the first run: {evaluation.PRIMARY}{RESET}\n")
+
+    mark = "passes" if converged else f"{BOLD}FAILS{RESET}"
+    _out(f"  strip every advantage → arms identical: {mark}")
+    if not converged:
+        # Printed first and loudly: without it the numbers below are measuring
+        # a decision in world.py rather than a mechanism.
+        _out(f"  {BOLD}the numbers below are not evidence of anything.{RESET}")
+
+    _out(f"\n  {BOLD}by household{RESET}  {DIM}(forgetfulness 0.5){RESET}")
+    _out(f"    {'household':<14} {'without':>9} {'with':>9}   verdict")
+    for row in evaluation.by_household(forgetfulness=0.5):
+        _out(
+            f"    {row['household']:<14} {row['without_agent']:>9.2f} {row['with_agent']:>9.2f}"
+            f"   {row['better']}"
+        )
+    _out(f"    {DIM}the mean across these is an artefact — see docs/EVALUATION.md{RESET}")
+
+    _out(
+        f"\n  {BOLD}sweep{RESET}  {DIM}(averaged; read the per-household table above first){RESET}"
+    )
+    _out(f"    {'forgetfulness':>13} {'without':>9} {'with':>9}   verdict")
+    for point in points:
+        c = point.primary
+        _out(
+            f"    {point.forgetfulness:>13.1f} {c.without_agent:>9.2f} {c.with_agent:>9.2f}"
+            f"   {c.better}"
+        )
+    _out(f"\n{DIM}what this does not show: docs/EVALUATION.md{RESET}\n")
+    return 0
+
+
+# --- refunds -------------------------------------------------------------------
+
+
+def cmd_refund_request(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        result = refund.request(
+            person_id=int(person["id"]),
+            attempt_id=args.attempt,
+            description=args.description,
+            amount_cents=args.amount_cents,
+            currency=args.currency,
+            reason=args.reason,
+            db_path=args.db,
+        )
+    except refund.RefundError as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"recorded: {result['description']} — {result['amount']}")
+    _out(f"{DIM}{result['note']}.{RESET}")
+    return 0
+
+
+def cmd_refund_list(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    rows = refund.everything(int(person["id"]), db_path=args.db)
+    if args.json:
+        _out(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        _out("no refunds asked for.")
+        return 0
+    for row in rows:
+        _out(
+            f"  {row['id']:>4}  {row['description']:<28}"
+            f" {_money(int(row['amount_cents']), str(row['currency']))}  [{row['status']}]"
+        )
+        _out(f"        {DIM}{row['reason']}{RESET}")
+        if row["resolution"]:
+            _out(f"        {DIM}→ {row['resolution']}{RESET}")
+    return 0
+
+
+def cmd_refund_resolve(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        result = refund.resolve(
+            args.id,
+            person_id=int(person["id"]),
+            refunded=args.refunded,
+            resolution=args.note,
+            db_path=args.db,
+        )
+    except (refund.RefundError, store.NotFoundError, store.StoreError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"{result['status']}: {result['description']}")
+    return 0
+
+
 # --- approvals ---------------------------------------------------------------
 
 
@@ -937,6 +1041,34 @@ def build_parser() -> argparse.ArgumentParser:
     pricing = sub.add_parser("price", help="read a price off a real product page")
     pricing.add_argument("url")
     pricing.set_defaults(func=cmd_price)
+
+    refunds = sub.add_parser("refund", help="ask for money back on something bought")
+    refunds_sub = refunds.add_subparsers(dest="refund_command", required=True)
+
+    refund_new = refunds_sub.add_parser("request", help="record that you want a refund")
+    _add_person_flags(refund_new)
+    refund_new.add_argument("--attempt", required=True, help="pay-warden attempt id")
+    refund_new.add_argument("--description", required=True)
+    refund_new.add_argument("--amount-cents", type=int, required=True, dest="amount_cents")
+    refund_new.add_argument("--currency", default="GBP")
+    refund_new.add_argument("--reason", required=True, help="your words; stored verbatim")
+    refund_new.set_defaults(func=cmd_refund_request)
+
+    refund_list = refunds_sub.add_parser("list", help="refunds asked for")
+    _add_person_flags(refund_list)
+    refund_list.set_defaults(func=cmd_refund_list)
+
+    refund_done = refunds_sub.add_parser("resolve", help="record how it ended")
+    _add_person_flags(refund_done)
+    refund_done.add_argument("--id", type=int, required=True)
+    outcome = refund_done.add_mutually_exclusive_group(required=True)
+    outcome.add_argument("--refunded", action="store_true")
+    outcome.add_argument("--refused", action="store_true")
+    refund_done.add_argument("--note", default="")
+    refund_done.set_defaults(func=cmd_refund_resolve)
+
+    evaluating = sub.add_parser("evaluate", help="does this make anyone better off?")
+    evaluating.set_defaults(func=cmd_evaluate)
 
     approvals = sub.add_parser("approvals", help="purchases waiting on a sponsor")
     approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)

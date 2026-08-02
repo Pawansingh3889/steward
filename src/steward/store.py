@@ -157,6 +157,24 @@ CREATE TABLE IF NOT EXISTS plan_items (
   status TEXT NOT NULL DEFAULT 'planned',
   created_ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS refunds (
+  id INTEGER PRIMARY KEY,
+  person_id INTEGER NOT NULL REFERENCES people(id),
+  -- pay-warden's attempt id, so a refund is anchored to something that
+  -- actually happened rather than to a description somebody typed.
+  attempt_id TEXT NOT NULL,
+  description TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  -- In the person's own words. Never summarised by a model: this is the text a
+  -- merchant may end up reading, and a paraphrase of a complaint is a different
+  -- complaint.
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'requested',
+  resolution TEXT NOT NULL DEFAULT '',
+  created_ts TEXT NOT NULL,
+  resolved_ts TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY,
   person_id INTEGER NOT NULL DEFAULT 0,
@@ -197,6 +215,7 @@ CREATE INDEX IF NOT EXISTS idx_escalations_sponsor ON escalations(sponsor_id, st
 CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_attempt ON escalations(attempt_id);
 CREATE INDEX IF NOT EXISTS idx_plans_person ON plans(person_id, status);
 CREATE INDEX IF NOT EXISTS idx_plan_items_plan ON plan_items(plan_id);
+CREATE INDEX IF NOT EXISTS idx_refunds_person ON refunds(person_id, status);
 """
 
 _initialized: set[str] = set()
@@ -899,6 +918,73 @@ def list_plan_items(plan_id: int, db_path: str | None = None) -> list[dict[str, 
         return _rows(
             conn.execute("SELECT * FROM plan_items WHERE plan_id = ? ORDER BY id", (plan_id,))
         )
+
+
+# --- refunds -------------------------------------------------------------------
+
+REFUND_REQUESTED = "requested"
+REFUND_REFUNDED = "refunded"
+REFUND_REFUSED = "refused"
+REFUND_STATUSES = (REFUND_REQUESTED, REFUND_REFUNDED, REFUND_REFUSED)
+
+
+def insert_refund(
+    *,
+    person_id: int,
+    attempt_id: str,
+    description: str,
+    amount_cents: int,
+    currency: str,
+    reason: str,
+    db_path: str | None = None,
+) -> int:
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO refunds (person_id, attempt_id, description, amount_cents, currency,"
+            " reason, created_ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (person_id, attempt_id, description, amount_cents, currency, reason, utc_now_iso()),
+        )
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+
+def get_refund(refund_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    with transaction(db_path) as conn:
+        return _row(conn.execute("SELECT * FROM refunds WHERE id = ?", (refund_id,)))
+
+
+def list_refunds(
+    person_id: int, *, status: str = "", db_path: str | None = None
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM refunds WHERE person_id = ?"
+    params: list[Any] = [person_id]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY id DESC"
+    with transaction(db_path) as conn:
+        return _rows(conn.execute(sql, tuple(params)))
+
+
+def resolve_refund(
+    refund_id: int,
+    *,
+    person_id: int,
+    status: str,
+    resolution: str = "",
+    db_path: str | None = None,
+) -> None:
+    """Record how a refund ended, exactly once and only the owner's."""
+    if status not in (REFUND_REFUNDED, REFUND_REFUSED):
+        raise StoreError(f"a refund ends refunded or refused, not {status!r}")
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE refunds SET status = ?, resolution = ?, resolved_ts = ?"
+            " WHERE id = ? AND person_id = ? AND status = 'requested'",
+            (status, resolution, utc_now_iso(), refund_id, person_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no open refund {refund_id} of yours to resolve")
 
 
 # --- agent audit -------------------------------------------------------------

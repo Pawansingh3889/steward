@@ -15,8 +15,23 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 7 of 8. A real calendar drives a real plan, and real prices are read where
-merchants publish them.
+**All 8 phases built.** 468 tests + 6 opt-in, ruff clean.
+
+```
+$ steward evaluate
+
+  strip every advantage → arms identical: passes
+
+  by household  (forgetfulness 0.5)          without     with   verdict
+    comfortable                                12.17     0.00   with_agent
+    tight                                      12.17     0.00   with_agent
+    overreaching                               12.17    44.47   without_agent
+    precarious                                 12.17     0.00   with_agent
+```
+
+Three of four households reach zero stockout-days. The fourth is worse with the
+agent, and the write-up says why rather than averaging it away —
+**[docs/EVALUATION.md](docs/EVALUATION.md)**, including what it does not show.
 
 ```
 $ steward plan propose --name Lisbon --kind trip \
@@ -336,6 +351,18 @@ Reaching the network from the test suite requires `@pytest.mark.live` — the on
 way past the no-network guard, written on the test itself, so grepping for it
 lists every test that can.
 
+## Asking for money back
+
+`steward refund request` records a claim in the person's **own words, verbatim**
+— a model must not summarise a complaint, because the paraphrase is a different
+complaint and this is the text a merchant might read. It is anchored to a
+pay-warden attempt id, so it refers to something that actually happened.
+
+steward does **not** contact the merchant, open a dispute, or speak to a bank,
+and it says so on every request. Somebody who thinks a claim has been filed will
+not chase it themselves. There is no refund tool for the model, for the same
+reason there is none for approving a purchase.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -374,6 +401,10 @@ src/steward/
   catalogue/
     fixtures.py    the modelled storefront, and why it is modelled
     search.py      offers, ordering, and price integrity at purchase
+  evaluation/
+    world.py       two arms, three separable advantages, one shared world
+    metrics.py     the primary metric, fixed before the first run
+    report.py      a curve and a per-household table, not a headline
   integrations/
     google.py      read-only calendar and mail; fetch, never interpret
     prices.py      structured data only; None rather than a guess
