@@ -25,6 +25,7 @@ and a handset is not where the record lives.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import segno
@@ -115,7 +116,11 @@ class Console:
         to show the spender's conversation: the channel addresses a person, and
         nothing steward sends to Rae was ever addressed to Ana.
         """
-        return [row for row in self.log if row["person_id"] == person_id]
+        return [
+            {**row, "qr": "" if row["inbound"] else payment_qr(str(row["body"]))}
+            for row in self.log
+            if row["person_id"] == person_id
+        ]
 
     def waiting(self, sponsor_id: int) -> list[dict[str, Any]]:
         return purchase.pending_for_sponsor(sponsor_id, db_path=self.db_path)
@@ -124,12 +129,50 @@ class Console:
 # --- rendering ----------------------------------------------------------------
 
 
+# Prava's hosted payment page. Matched narrowly on purpose: a QR is an
+# instruction to point a camera at something, and this page should only ever
+# offer that for the one link it knows is a payment.
+_PAYMENT_URL = re.compile(r"https://[\w.-]*collect\.prava\.space\S*")
+
+
+def payment_qr(body: str) -> str:
+    """A scannable code for the payment link, if this message carries one.
+
+    The link goes to the spender, and a spender reading it on a laptop cannot
+    use it — the passkey is on their phone. So the code sits beside the link
+    rather than replacing it: scan it, or read the URL, whichever you have.
+
+    The URL is never invented here. It is matched out of a message pay-warden
+    produced, which is the only place in this system a payment URL comes from.
+
+    Returned as a data URI rather than markup, because the thread is redrawn by
+    the client from /state — building it into the server's HTML only meant the
+    first paint had a code and every refresh after that threw it away.
+    """
+    found = _PAYMENT_URL.search(body)
+    if found is None:
+        return ""
+    url = found.group(0).rstrip(".,)")
+    return segno.make(url, error="m").svg_data_uri(scale=4, dark="#000", light="#fff")
+
+
+def _payment_qr_html(body: str) -> str:
+    uri = payment_qr(body)
+    if not uri:
+        return ""
+    return (
+        f'<figure class="pay"><img src="{render.text(uri)}" alt="payment code">'
+        "<figcaption>scan to pay with your passkey</figcaption></figure>"
+    )
+
+
 def _bubble_html(row: dict[str, Any]) -> str:
     side = "them" if row["inbound"] else "agent"
+    qr_html = "" if row["inbound"] else _payment_qr_html(str(row["body"]))
     return (
         f'<div class="bubble {render.text(side)}">'
         f'<div class="bubble-who">{render.text(row["who"])}</div>'
-        f'<p>{render.text(row["body"])}</p></div>'
+        f'<p>{render.text(row["body"])}</p>{qr_html}</div>'
     )
 
 
@@ -177,7 +220,9 @@ function draw(who, rows, force) {
   const stuck = force || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   el.innerHTML = rows.length ? rows.map(r =>
     `<div class="bubble ${r.inbound ? "them" : "agent"}">
-       <div class="bubble-who">${esc(r.who)}</div><p>${esc(r.body)}</p></div>`).join("")
+       <div class="bubble-who">${esc(r.who)}</div><p>${esc(r.body)}</p>
+       ${r.qr ? `<figure class="pay"><img src="${esc(r.qr)}" alt="payment code">
+         <figcaption>scan to pay with your passkey</figcaption></figure>` : ""}</div>`).join("")
     : `<p class="empty">Nothing said yet.</p>`;
   if (stuck) el.scrollTop = el.scrollHeight;
 }
