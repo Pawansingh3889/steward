@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -642,6 +643,104 @@ def test_the_stylesheet_cannot_close_its_own_element() -> None:
     from steward.web import style
 
     assert "</style" not in style.STYLESHEET.lower()
+
+
+# --- colour ------------------------------------------------------------------
+# style.py states the contrast rule in its docstring. This is the rule, enforced
+# — the same move as the escaping walk above, for the same reason: a palette
+# that was right once and is later nudged by eye stops being right *silently*,
+# and never for the person doing the nudging.
+
+AA_TEXT = 4.5  # normal text
+AA_UI = 3.0  # large text, and the ring or boundary that locates a control
+
+
+def _luminance(colour: str) -> float:
+    def channel(value: int) -> float:
+        part = value / 255
+        return part / 12.92 if part <= 0.03928 else ((part + 0.055) / 1.055) ** 2.4
+
+    raw = colour.lstrip("#")
+    red, green, blue = (int(raw[at : at + 2], 16) for at in (0, 2, 4))
+    return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+
+def contrast(foreground: str, background: str) -> float:
+    first, second = _luminance(foreground), _luminance(background)
+    return (max(first, second) + 0.05) / (min(first, second) + 0.05)
+
+
+def _palettes() -> dict[str, dict[str, str]]:
+    """Both themes, read back out of the stylesheet that actually ships.
+
+    Not a copy of the values: a test holding its own colours would keep passing
+    after somebody changed the real ones, which is the failure it exists to
+    catch.
+    """
+    from steward.web import style
+
+    def read(chunk: str) -> dict[str, str]:
+        return dict(re.findall(r"(--[a-z-]+):\s*(#[0-9a-f]{6})", chunk))
+
+    sheet = style.STYLESHEET
+    opens = sheet.index("@media (prefers-color-scheme: dark)")
+    closes = sheet.index("\n* {", opens)
+    light = read(sheet[:opens])
+    # Dark redeclares only some tokens; the rest carry over, exactly as the
+    # cascade resolves them in a browser.
+    return {"light": light, "dark": light | read(sheet[opens:closes])}
+
+
+# Every pair these pages actually draw, and what each has to clear.
+PAIRS = [
+    ("ink on panel", "--ink", "--panel", AA_TEXT),
+    ("ink-soft on panel", "--ink-soft", "--panel", AA_TEXT),
+    ("ink-faint on panel", "--ink-faint", "--panel", AA_TEXT),
+    ("ink-faint on sunken", "--ink-faint", "--panel-sunken", AA_TEXT),
+    ("ink-faint on bg", "--ink-faint", "--bg", AA_TEXT),
+    ("badge good", "--good-ink", "--good-bg", AA_TEXT),
+    ("badge wait", "--wait-ink", "--wait-bg", AA_TEXT),
+    ("badge bad", "--bad-ink", "--bad-bg", AA_TEXT),
+    ("badge flat", "--flat-ink", "--flat-bg", AA_TEXT),
+    ("accent link on panel", "--accent", "--panel", AA_TEXT),
+    ("accent link on bg", "--accent", "--bg", AA_TEXT),
+    ("sent bubble", "--accent-on-fill", "--accent-fill", AA_TEXT),
+    ("sent bubble label", "--accent-on-fill-muted", "--accent-fill", AA_TEXT),
+    ("focus ring on panel", "--accent", "--panel", AA_UI),
+    ("focus ring on sunken", "--accent", "--panel-sunken", AA_UI),
+    ("focus ring on bg", "--accent", "--bg", AA_UI),
+]
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_every_colour_pair_clears_wcag_aa(theme: str) -> None:
+    palette = _palettes()[theme]
+
+    failed = [
+        f"{label} {contrast(palette[ink], palette[on]):.2f}:1 (needs {need})"
+        for label, ink, on, need in PAIRS
+        if contrast(palette[ink], palette[on]) < need
+    ]
+
+    assert not failed, f"{theme}: " + "; ".join(failed)
+
+
+def test_the_contrast_check_can_actually_fail() -> None:
+    """A fitness test nobody has seen fail is a comment. White on #7ba0ff is
+    the exact bug this was written for: --accent was doing duty as a fill."""
+    assert contrast("#ffffff", "#7ba0ff") < AA_TEXT
+    assert contrast("#ffffff", "#1f4fd8") >= AA_TEXT
+
+
+def test_the_accent_is_never_used_as_a_fill() -> None:
+    """The split only holds while nothing paints a surface with the foreground
+    token again. --accent behind white is 2.53:1 in dark mode."""
+    from steward.web import style
+
+    for line in style.STYLESHEET.splitlines():
+        drawing = line.split("/*")[0]
+        assert "background: var(--accent)" not in drawing, line
+        assert "background-color: var(--accent)" not in drawing, line
 
 
 # --- empty states ------------------------------------------------------------

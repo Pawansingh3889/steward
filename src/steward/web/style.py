@@ -9,6 +9,14 @@ Two visual vocabularies, and keeping them unlike each other is the point.
 Statuses are filled pills carrying data. Annotations — FIXTURE, dry-run,
 advisory only — are outlined and monospace, so they can never be mistaken for a
 status at a glance.
+
+Colour here is computed, not picked. Every foreground/background pair below
+clears WCAG AA — **4.5:1 for normal text, 3:1 for large text and for the ring
+or boundary that tells you where a control is** — and the measured ratio is in
+the comment beside the token. That is not ceremony: a palette that was right
+once and is later nudged by eye stops being right *silently*, and the person it
+stops working for is never the person who changed it. If you alter a colour
+here, recompute the pairs it appears in.
 """
 
 from __future__ import annotations
@@ -21,10 +29,18 @@ STYLESHEET = """
   --panel-sunken: #f1f3f6;
   --ink: #14171c;
   --ink-soft: #4a5261;
-  --ink-faint: #767f8f;
+  --ink-faint: #646c7a;   /* 4.76:1 on --panel-sunken, its worst surface */
   --line: #dfe3ea;
   --line-strong: #c6ccd8;
-  --accent: #1f4fd8;
+  /* --accent is a *foreground*: links, the current tab, the focus ring — so in
+     dark mode it has to be light enough to read on a dark panel. --accent-fill
+     is the opposite job, a surface with white text sitting on it, so it has to
+     stay dark in both modes. One token cannot do both, and while it tried,
+     every message the person sent was white on #7ba0ff at 2.53:1. */
+  --accent: #1f4fd8;                /* 6.63:1 on --panel */
+  --accent-fill: #1f4fd8;           /* --accent-on-fill on it: 6.63:1 */
+  --accent-on-fill: #ffffff;
+  --accent-on-fill-muted: #d4dcf7;  /* 4.85:1 on --accent-fill */
   --good-bg: #e3f5ea; --good-ink: #146b3c; --good-line: #a9dcc0;
   --wait-bg: #fdf0d9; --wait-ink: #8a5605; --wait-line: #eecd95;
   --bad-bg: #fce8e8;  --bad-ink: #9c2222;  --bad-line: #edb9b9;
@@ -43,10 +59,14 @@ STYLESHEET = """
     --panel-sunken: #1d222b;
     --ink: #e9ecf1;
     --ink-soft: #aab3c1;
-    --ink-faint: #7f8899;
+    --ink-faint: #848d9e;   /* 4.78:1 on --panel-sunken; #7f8899 was 4.47 */
     --line: #262c37;
     --line-strong: #333b49;
-    --accent: #7ba0ff;
+    --accent: #7ba0ff;                /* 6.84:1 on --panel */
+    --accent-fill: #3457b8;           /* deliberately not --accent: white on
+                                         that was 2.53:1. This is 6.56:1. */
+    --accent-on-fill: #ffffff;
+    --accent-on-fill-muted: #d4dcf7;  /* 4.80:1 on --accent-fill */
     --good-bg: #12301f; --good-ink: #7ddba4; --good-line: #22563a;
     --wait-bg: #33260c; --wait-ink: #f0c274; --wait-line: #5c451a;
     --bad-bg: #35171a;  --bad-ink: #f0a0a0;  --bad-line: #5d2a2d;
@@ -67,6 +87,28 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .page { max-width: 1180px; margin-inline: auto; padding: 40px 28px 72px; }
+
+/* --- focus: drawn, not left to the user agent --------------------------- */
+/* Everything interactive on these pages is custom-drawn, so the browser's
+   default ring lands on surfaces it was never contrasted against — on the
+   composer's button, against --panel-sunken, it is very nearly invisible.
+
+   :focus-visible rather than :focus, so a mouse click does not leave a ring
+   sitting there afterwards. The keyboard user is the one who needs it; to the
+   mouse user the same ring reads as a control stuck in a state.
+
+   outline-offset is doing real work, not spacing. --accent scores 1.00:1
+   against --accent-fill, so a ring drawn inside a filled surface would vanish
+   into it; offset outward it lands on the panel behind, where it clears 3:1 in
+   both modes (light 6.63, dark 6.84). */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 /* --- the banner --------------------------------------------------------- */
 .banner { margin-bottom: 26px; }
@@ -260,8 +302,10 @@ STYLESHEET += """
 .bubble-who { font-size: .75rem; color: var(--ink-faint); margin-bottom: 3px; }
 /* The person typing is on the right, steward on the left — the arrangement a
    phone uses, so nobody has to be told which side is which. */
-.bubble.them { align-self: flex-end; background: var(--accent); color: #fff; }
-.bubble.them .bubble-who { color: rgba(255,255,255,.75); }
+.bubble.them { align-self: flex-end; background: var(--accent-fill); color: var(--accent-on-fill); }
+/* A solid token, not white-at-75%: the opacity was what pushed this to 2.04:1
+   in dark mode. It is de-emphasised by being smaller, which costs no contrast. */
+.bubble.them .bubble-who { color: var(--accent-on-fill-muted); }
 .bubble.agent { align-self: flex-start; background: var(--panel-sunken); border: 1px solid var(--line); }
 .composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
 .composer input {
