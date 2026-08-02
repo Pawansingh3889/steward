@@ -86,7 +86,20 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
-.page { max-width: 1180px; margin-inline: auto; padding: 40px 28px 72px; }
+/* Page padding lives here and nowhere else. It used to be here *and* on body —
+   the handset rules further down grew their own — and the two stacked: 52px a
+   side on every screen, 136px of dead space at the foot. On a 375px phone that
+   spent 104px of the viewport on margins before a word was drawn. The
+   safe-area insets belong on whichever element carries the padding, so they
+   moved here with it rather than staying behind on body. */
+.page {
+  max-width: 1180px;
+  margin-inline: auto;
+  padding-top: 40px;
+  padding-left: max(28px, env(safe-area-inset-left));
+  padding-right: max(28px, env(safe-area-inset-right));
+  padding-bottom: max(72px, env(safe-area-inset-bottom));
+}
 
 /* --- focus: drawn, not left to the user agent --------------------------- */
 /* Everything interactive on these pages is custom-drawn, so the browser's
@@ -349,13 +362,10 @@ html {
   /* Safari resizes text in landscape unless told not to. */
   -webkit-text-size-adjust: 100%;
 }
-body {
-  /* Keeps content clear of the notch and the home indicator. Zero on anything
-     that has neither, so Android and desktop are untouched. */
-  padding-left: max(24px, env(safe-area-inset-left));
-  padding-right: max(24px, env(safe-area-inset-right));
-  padding-bottom: max(64px, env(safe-area-inset-bottom));
-}
+/* There was a body rule here clearing the notch and the home indicator. .page
+   already did that, at the top of this file, which is how every screen ended up
+   padded twice. One owner now, and it is .page. */
+
 .composer input {
   /* Exactly 16px, and not a rem less. Mobile Safari zooms the whole page when a
      focused input is smaller than this, which on a chat box means every reply
@@ -376,8 +386,18 @@ body {
   .lines:not(.solo) .thread { max-height: 62vh; overflow-y: auto; }
 }
 
+/* One query for every phone in portrait. 375 (SE), 390 (14), 412 (Pixel) and
+   428 (Pro Max) all sit well under this, and none of them wants a different
+   number — they want the same one, which is why this is a bound and not a set
+   of device widths. The insets are repeated because this rule replaces the
+   left/right padding set at the top, and leaving them out here would put text
+   back under the notch in landscape. */
 @media (max-width: 620px) {
-  .page { padding-top: 20px; }
+  .page {
+    padding-top: 20px;
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
   .thread { padding: 12px; }
   .bubble { max-width: 92%; }
   .line-head { padding: 11px 12px; }
