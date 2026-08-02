@@ -36,6 +36,9 @@ def _fact_view(row: dict[str, Any]) -> dict[str, Any]:
         # never be displayed as if they were the same one.
         "source": str(row["source"]),
         "since": str(row["created_ts"]),
+        # Present and true when this began as a machine's reading and the
+        # person agreed to it, which promotion to `stated` would otherwise hide.
+        "confirmed": bool(row["confirmed_ts"]),
     }
 
 
@@ -48,14 +51,31 @@ def everything(person_id: int, *, db_path: str | None = None) -> dict[str, Any]:
 
     No limit and no pagination. Someone asking what is held about them is owed
     all of it — a truncated answer to this particular question is a wrong one.
+
+    `pending` is listed separately and is not part of `facts`, because the two
+    are different claims: one is what steward believes and acts on, the other is
+    what a model thought it read and is waiting to be told about.
     """
     facts = store.list_facts(person_id, db_path=db_path)
+    pending = store.list_facts(person_id, pending=True, db_path=db_path)
     episodes = store.list_episodes(person_id, db_path=db_path)
     return {
         "facts": [_fact_view(row) for row in facts],
+        "pending": [_fact_view(row) for row in pending],
         "episodes": [_episode_view(row) for row in episodes],
-        "counts": {"facts": len(facts), "episodes": len(episodes)},
+        "counts": {"facts": len(facts), "pending": len(pending), "episodes": len(episodes)},
     }
+
+
+def confirm(
+    fact_id: int, *, person_id: int | None = None, db_path: str | None = None
+) -> dict[str, Any]:
+    """Accept a proposal. From here it is a belief and may drive decisions."""
+    row = store.get_fact(fact_id, db_path=db_path)
+    if row is None or (person_id is not None and int(row["person_id"]) != person_id):
+        raise store.NotFoundError(f"no fact {fact_id} belonging to you")
+    store.confirm_fact(fact_id, db_path=db_path)
+    return {"id": fact_id, "confirmed": True, "key": str(row["key"]), "value": str(row["value"])}
 
 
 def search(

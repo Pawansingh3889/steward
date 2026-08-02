@@ -167,7 +167,7 @@ def test_everything_returns_both_kinds_of_memory(person: int, db: str) -> None:
 
     held = recall.everything(person, db_path=db)
 
-    assert held["counts"] == {"facts": 1, "episodes": 1}
+    assert held["counts"] == {"facts": 1, "pending": 0, "episodes": 1}
     assert held["facts"][0]["key"] == "soap"
     assert held["episodes"][0]["text"] == "I'm out of soap again"
 

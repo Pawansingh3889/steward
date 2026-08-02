@@ -24,7 +24,7 @@ import httpx
 
 from .. import store
 from . import bank, ics, local
-from .base import Candidate
+from .base import INFERRED, Candidate
 
 # Cheap recognisers, in the order they are tried. A parser that claims material
 # it cannot actually read would silently starve the fallback, so each one is
@@ -105,15 +105,23 @@ def commit(
     """
     written: list[dict[str, Any]] = []
     for candidate in extraction.candidates:
+        # Anything a model inferred lands pending: invisible to `recall_facts`,
+        # and therefore to the frontier model, until the person confirms it.
+        # A street address written in prose has no syntax any redaction pattern
+        # can catch, so the defence is that nobody guessed it into memory
+        # unattended. Deterministic parsers are exempt — every field they emit
+        # was chosen by hand, in code, and reviewed.
+        pending = candidate.source == INFERRED
         fact_id = store.upsert_fact(
             person_id=person_id,
             kind=candidate.kind,
             key=candidate.key,
             value=candidate.value,
             source=candidate.source,
+            pending=pending,
             db_path=db_path,
         )
-        written.append({"fact_id": fact_id, **candidate.as_dict()})
+        written.append({"fact_id": fact_id, "pending": pending, **candidate.as_dict()})
     return written
 
 

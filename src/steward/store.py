@@ -26,7 +26,10 @@ from typing import Any
 from . import config
 from .models import utc_now_iso
 
-SCHEMA = """
+# Tables, then columns added later, then indexes — in that order, because an
+# index over a column this version introduced cannot be created until the
+# migration has added it to databases that predate it.
+TABLES = """
 CREATE TABLE IF NOT EXISTS people (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -52,7 +55,15 @@ CREATE TABLE IF NOT EXISTS facts (
   source TEXT NOT NULL DEFAULT 'stated',
   created_ts TEXT NOT NULL,
   -- Tombstone. Empty string means live; see the module docstring.
-  deleted_ts TEXT NOT NULL DEFAULT ''
+  deleted_ts TEXT NOT NULL DEFAULT '',
+  -- A proposal, not yet a belief. Anything a model inferred lands here and is
+  -- invisible to `recall_facts` — and therefore to the frontier model —
+  -- until the person confirms it. See `confirm_fact`.
+  pending INTEGER NOT NULL DEFAULT 0,
+  -- When a person confirmed a proposal. Its presence on a `stated` fact is how
+  -- we can still tell "they typed this" from "a machine read it and they
+  -- agreed", which `source` alone would lose at the moment of promotion.
+  confirmed_ts TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS turns (
   id INTEGER PRIMARY KEY,
@@ -98,13 +109,19 @@ CREATE TABLE IF NOT EXISTS agent_transcripts (
   messages TEXT NOT NULL,
   ts TEXT NOT NULL
 );
--- One live fact per (person, kind, key); tombstoned rows are exempt, so
--- re-stating something you deleted is an insert rather than a constraint
--- violation. A plain UNIQUE would make deletion permanent in the worst way:
--- you could never say it again.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_live
-  ON facts(person_id, kind, key) WHERE deleted_ts = '';
+"""
+
+INDEXES = """
+-- One live *believed* fact per (person, kind, key). Two exemptions, each
+-- deliberate: tombstoned rows, so re-stating something you deleted is an
+-- insert rather than a constraint violation; and pending rows, so a proposal
+-- can sit alongside the belief it would replace without displacing it. A plain
+-- UNIQUE would make deletion permanent in the worst way — you could never say
+-- the thing again — and would let an unconfirmed guess evict a confirmed fact.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_believed
+  ON facts(person_id, kind, key) WHERE deleted_ts = '' AND pending = 0;
 CREATE INDEX IF NOT EXISTS idx_facts_person ON facts(person_id, kind);
+CREATE INDEX IF NOT EXISTS idx_facts_pending ON facts(person_id, pending, deleted_ts);
 CREATE INDEX IF NOT EXISTS idx_episodes_person ON episodes(person_id, deleted_ts);
 CREATE INDEX IF NOT EXISTS idx_turns_person ON turns(person_id, ts);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_ts ON agent_runs(ts);
@@ -135,7 +152,16 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 # this way or a deployed volume stays one schema behind and fails on the first
 # query that names the new column. Additive only — SQLite cannot drop or retype
 # a column without rebuilding the table.
-ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("facts", "pending", "INTEGER NOT NULL DEFAULT 0"),
+    ("facts", "confirmed_ts", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Indexes this version replaced. Dropped by name before the new ones are
+# created, because `CREATE INDEX IF NOT EXISTS` under a name that already
+# exists is a silent no-op — an old database would keep enforcing the old
+# uniqueness rule and reject the very proposals the new one allows.
+DROPPED_INDEXES: tuple[str, ...] = ("idx_facts_live",)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -143,17 +169,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
+    for index in DROPPED_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
 
 
 def _ensure_schema(conn: sqlite3.Connection, path: str) -> None:
-    """Run the schema once per DB path per process."""
+    """Run the schema once per DB path per process.
+
+    Tables, then migrations, then indexes. The order is load-bearing: an index
+    over a column this version added cannot be created on an older database
+    until the ALTER TABLE that adds it has run.
+    """
     if path in _initialized:
         return
     with _init_lock:
         if path in _initialized:
             return
-        conn.executescript(SCHEMA)
+        conn.executescript(TABLES)
         _migrate(conn)
+        conn.executescript(INDEXES)
         conn.commit()
         # ":memory:" is a brand-new database on every connection, so caching it
         # as initialized would hand the next caller an empty schema.
@@ -246,6 +280,7 @@ def upsert_fact(
     key: str,
     value: str,
     source: str = "stated",
+    pending: bool = False,
     db_path: str | None = None,
 ) -> int:
     """Set a fact, superseding any live fact with the same (person, kind, key).
@@ -255,18 +290,29 @@ def upsert_fact(
     list that grows every time they repeat themselves. The superseded row is
     tombstoned rather than overwritten, so the history of what we believed and
     when stays intact.
+
+    A **pending** write supersedes only other pending proposals. It must never
+    displace a believed fact: a model that guessed wrong would otherwise
+    silently evict something the person actually told us, replacing it with a
+    proposal they cannot even see until they go looking. Conversely a believed
+    write clears any pending proposal for the same key, because the person has
+    now said what is true and there is nothing left to ask them about.
     """
     now = utc_now_iso()
     with transaction(db_path) as conn:
+        if pending:
+            supersede = "AND pending = 1"
+        else:
+            supersede = ""  # clears the belief *and* any proposal about it
         conn.execute(
             "UPDATE facts SET deleted_ts = ? WHERE person_id = ? AND kind = ?"
-            " AND key = ? AND deleted_ts = ''",
+            f" AND key = ? AND deleted_ts = '' {supersede}",
             (now, person_id, kind, key),
         )
         cur = conn.execute(
-            "INSERT INTO facts (person_id, kind, key, value, source, created_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (person_id, kind, key, value, source, now),
+            "INSERT INTO facts (person_id, kind, key, value, source, created_ts, pending)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (person_id, kind, key, value, source, now, int(pending)),
         )
         assert cur.lastrowid is not None
         return int(cur.lastrowid)
@@ -276,11 +322,19 @@ def list_facts(
     person_id: int,
     *,
     kind: str = "",
+    pending: bool = False,
     include_deleted: bool = False,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    sql = "SELECT * FROM facts WHERE person_id = ?"
-    params: list[Any] = [person_id]
+    """Believed facts by default; pass `pending=True` for the proposals.
+
+    The default is the safe one on purpose. Every caller that feeds the model —
+    `agent/tools.py` above all — gets believed facts without having to remember
+    to ask for them, and a new caller that forgets the distinction entirely
+    still cannot leak an unconfirmed guess.
+    """
+    sql = "SELECT * FROM facts WHERE person_id = ? AND pending = ?"
+    params: list[Any] = [person_id, int(pending)]
     if not include_deleted:
         sql += " AND deleted_ts = ''"
     if kind:
@@ -289,6 +343,32 @@ def list_facts(
     sql += " ORDER BY kind, key"
     with transaction(db_path) as conn:
         return _rows(conn.execute(sql, tuple(params)))
+
+
+def confirm_fact(fact_id: int, db_path: str | None = None) -> None:
+    """Promote a proposal to a belief.
+
+    The person has read it and said yes, so it now carries their authority and
+    `source` becomes `stated`. `confirmed_ts` is what preserves the provenance
+    that promotion would otherwise erase: a `stated` fact with a confirmation
+    time was read by a machine and agreed to, which is not quite the same thing
+    as one the person typed themselves.
+    """
+    now = utc_now_iso()
+    with transaction(db_path) as conn:
+        row = _row(conn.execute("SELECT * FROM facts WHERE id = ?", (fact_id,)))
+        if row is None or row["deleted_ts"] or not row["pending"]:
+            raise NotFoundError(f"no pending fact {fact_id} to confirm")
+        # Confirming makes this the belief, so whatever it replaces goes now.
+        conn.execute(
+            "UPDATE facts SET deleted_ts = ? WHERE person_id = ? AND kind = ? AND key = ?"
+            " AND deleted_ts = '' AND pending = 0",
+            (now, row["person_id"], row["kind"], row["key"]),
+        )
+        conn.execute(
+            "UPDATE facts SET pending = 0, source = 'stated', confirmed_ts = ? WHERE id = ?",
+            (now, fact_id),
+        )
 
 
 def get_fact(fact_id: int, db_path: str | None = None) -> dict[str, Any] | None:

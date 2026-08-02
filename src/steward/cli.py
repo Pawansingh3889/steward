@@ -20,6 +20,7 @@ from typing import Any
 from . import config, store
 from .agent import llm
 from .extract import pipeline
+from .extract.base import INFERRED
 from .memory import recall
 from .models import FactKind, Role
 
@@ -106,9 +107,20 @@ def cmd_memory_list(args: argparse.Namespace) -> int:
         _out(f"{BOLD}facts{RESET}  {DIM}(these drive decisions){RESET}")
         for fact in held["facts"]:
             _out(f"  {fact['id']:>4}  {fact['kind']:<10} {fact['key']:<18} {fact['value']}")
-            _out(f"        {DIM}{fact['source']} · since {fact['since']}{RESET}")
+            provenance = "you confirmed this" if fact["confirmed"] else fact["source"]
+            _out(f"        {DIM}{provenance} · since {fact['since']}{RESET}")
     else:
         _out(f"{DIM}no facts stored.{RESET}")
+
+    if held["pending"]:
+        _out()
+        _out(
+            f"{BOLD}waiting for you{RESET}  "
+            f"{DIM}(a model read these; nothing sees them until you say so){RESET}"
+        )
+        for fact in held["pending"]:
+            _out(f"  {fact['id']:>4}  {fact['kind']:<10} {fact['key']:<18} {fact['value']}")
+        _out(f"        {DIM}steward memory confirm --fact ID   ·   or forget --fact ID{RESET}")
 
     _out()
     if held["episodes"]:
@@ -149,6 +161,20 @@ def cmd_memory_forget(args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from exc
     _out(f"forgotten: {kind} {item_id} — {result['was']!r}")
     _out(f"{DIM}it will not influence any future decision.{RESET}")
+    return 0
+
+
+def cmd_memory_confirm(args: argparse.Namespace) -> int:
+    """Accept a proposal a model made. Only a person can do this — there is no
+    tool for it, because an agent confirming its own guesses is the failure this
+    whole mechanism exists to prevent."""
+    person = _resolve_person(args)
+    try:
+        result = recall.confirm(int(args.fact), person_id=int(person["id"]), db_path=args.db)
+    except store.NotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"confirmed: {result['key']} — {result['value']!r}")
+    _out(f"{DIM}steward may now act on it.{RESET}")
     return 0
 
 
@@ -198,9 +224,18 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         return 0
     verb = "would learn" if args.dry_run else "learned"
     _out(f"\n{verb}:")
+    waiting = 0
     for candidate in extraction.candidates:
+        proposal = candidate.source == INFERRED
+        waiting += proposal
         _out(f"  {candidate.kind:<10} {candidate.key:<24} {candidate.value}")
-        _out(f"  {DIM}{'':<10} source: {candidate.source}{RESET}")
+        note = "a model read this — waiting for you" if proposal else f"source: {candidate.source}"
+        _out(f"  {DIM}{'':<10} {note}{RESET}")
+    if waiting and not args.dry_run:
+        _out(
+            f"\n{DIM}{waiting} waiting to be confirmed. Nothing sees them until you do:"
+            f"\n  steward memory list   then   steward memory confirm --fact ID{RESET}"
+        )
     return 0
 
 
@@ -270,6 +305,11 @@ def build_parser() -> argparse.ArgumentParser:
     forgetting.add_argument("--fact", type=int, default=0)
     forgetting.add_argument("--episode", type=int, default=0)
     forgetting.set_defaults(func=cmd_memory_forget)
+
+    confirming = memory_sub.add_parser("confirm", help="accept a proposal a model made")
+    _add_person_flags(confirming)
+    confirming.add_argument("--fact", type=int, required=True, help="id from memory list")
+    confirming.set_defaults(func=cmd_memory_confirm)
 
     adding = memory_sub.add_parser("add", help="state a fact directly")
     _add_person_flags(adding)

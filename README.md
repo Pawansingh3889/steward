@@ -15,7 +15,8 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 1 of 8. The agent answers from memory and you can correct it; nothing
+Phase 2 of 8. The agent answers from memory, you can correct it, and it can
+read a calendar or a bank alert without any of it leaving the machine. Nothing
 spends money yet.
 
 ```
@@ -58,6 +59,37 @@ agent nicely, deletion would be a request rather than a guarantee — and this
 product is asking someone to hand over their errands, their schedule and their
 moods on the strength of that guarantee.
 
+## Nothing a model guessed becomes a belief on its own
+
+Deterministic parsers handle the formulaic majority — bank alerts and `.ics`
+files are written by machines to a specification, so a parser reads them
+exactly, offline, identically every time. Free-form text goes to a **local**
+model (Ollama), and what it produces lands *pending*: visible to you, invisible
+to `recall_facts` and therefore to the frontier model, until you confirm it.
+
+```
+$ steward memory list
+
+waiting for you  (a model read these; nothing sees them until you say so)
+     2  identity   delivery_address   42 Wharf Lane, Salford M5 3EX
+     1  schedule   boiler             boiler service Thursday
+        steward memory confirm --fact ID   ·   or forget --fact ID
+```
+
+That address is why. A street address written in prose has no reliable syntax,
+so no redaction pattern will ever catch one — the only defence that works is
+that nobody guessed it into memory unattended. There is deliberately **no tool**
+for confirming: an agent confirming its own guesses would make the whole
+mechanism a formality.
+
+Confirming promotes a proposal to `stated`, because you have now asserted it.
+A confirmation timestamp is kept so "you typed this" and "a machine read it and
+you agreed" stay distinguishable.
+
+The local model is also the one component that sees unredacted text, so
+`OLLAMA_BASE` is checked: a non-loopback host is refused unless you opt in
+explicitly, and the error says exactly what you would be agreeing to.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -71,7 +103,9 @@ vectors survive a restart. It is a *lexical* matcher — "out of soap" will not
 match "need to restock hand wash" — which is written down rather than glossed,
 because the alternative is sending every conversational turn to an embeddings
 API and trading the privacy argument for better recall on the feature that
-matters least. Phase 2 brings a local model in through the same seam.
+matters least. The `Embedder` protocol is the seam for pointing this at the
+same local Ollama the extractor uses, which would understand that soap and hand
+wash are the same errand — still without anything leaving the device.
 
 ## Layout
 
@@ -81,6 +115,12 @@ src/steward/
   store.py         every SQL statement; people, facts, episodes, turns, audit
   models.py        shared vocabularies (roles, fact kinds, speakers, triggers)
   cli.py           the direct interface to your own memory
+  extract/
+    ics.py         calendars, minus the fields that would hurt
+    bank.py        alerts the person already received
+    local.py       Ollama, and the check that keeps it local
+    eta.py         delivery days from coordinates that never leave
+    pipeline.py    parsers first, the model for what is left
   memory/
     embed.py       local, dependency-free vectors
     episodic.py    what was said, searchable by resemblance
