@@ -406,17 +406,74 @@ def test_linq_sends_the_shape_the_api_actually_wants(monkeypatch: pytest.MonkeyP
     assert sent == [{"message": {"parts": [{"type": "text", "value": "hello"}]}}]
 
 
-def test_no_chat_means_a_clear_refusal_not_a_guess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opening a conversation is the one thing this cannot do yet."""
+def test_no_chat_means_one_is_opened_carrying_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening a conversation and sending the first message are the same call —
+    an iMessage thread does not exist until something has been said in it."""
     monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
-    sent: list[dict] = []
-    channel = linq.LinqChannel(http=httpx.Client(transport=_linq_transport([], sent)))
+    monkeypatch.setenv("LINQ_FROM_NUMBER", "+12062710710")
+    posted: list[dict] = []
 
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.method == "GET":
+            return httpx.Response(200, json={"chats": []})  # nobody yet
+        posted.append(_json.loads(request.content.decode()))
+        return httpx.Response(201, json={"chat": {**CHAT, "service": "SMS"}})
+
+    channel = linq.LinqChannel(http=httpx.Client(transport=httpx.MockTransport(handler)))
     delivery = channel.send(Outbound(person_id=1, body="hello"), to=SPENDER_LINE)
 
+    assert delivery.delivered is True
+    assert "opened a chat" in delivery.detail
+    assert "SMS" in delivery.detail  # the protocol the chat negotiated
+    # One call, carrying the message. Two would send it twice.
+    assert posted == [
+        {
+            "from": "+12062710710",
+            "to": [SPENDER_LINE],
+            "message": {"parts": [{"type": "text", "value": "hello"}]},
+        }
+    ]
+
+
+def test_opening_a_chat_needs_a_line_to_come_from(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
+    monkeypatch.setenv("LINQ_FROM_NUMBER", "")
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json={"chats": []}))
+
+    delivery = linq.LinqChannel(http=httpx.Client(transport=transport)).send(
+        Outbound(person_id=1, body="hi"), to=SPENDER_LINE
+    )
+
     assert delivery.delivered is False
-    assert "opening one is not implemented" in delivery.detail
-    assert sent == []
+    assert "LINQ_FROM_NUMBER is unset" in delivery.detail
+
+
+def test_an_existing_chat_is_never_reopened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reopening would be harmless on Linq's side — it is idempotent — but it
+    would post the message as part of the open call *and* leave the normal send
+    path unused, which is two different code paths for one outcome."""
+    monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
+            return httpx.Response(200, json={"chats": [CHAT]})
+        return httpx.Response(200, json={"id": "msg_1"})
+
+    linq.LinqChannel(http=httpx.Client(transport=httpx.MockTransport(handler))).send(
+        Outbound(person_id=1, body="hello"), to=SPENDER_LINE
+    )
+
+    # Asserted on suffixes: the base is pinned to an unregistrable host in
+    # tests, so the production path prefix is not there to match against.
+    assert len(paths) == 2
+    assert paths[0].startswith("GET ") and paths[0].endswith("/chats")
+    assert paths[1] == f"POST {paths[0].split(' ', 1)[1]}/{CHAT['id']}/messages"
 
 
 def test_a_group_chat_is_never_used_for_a_personal_message(

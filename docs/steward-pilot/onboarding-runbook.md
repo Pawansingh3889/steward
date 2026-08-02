@@ -33,7 +33,10 @@ Pair ID: ______  Sponsor ID: ______  Spender ID: ______  Operator: ______  Date:
       shown exactly what their decision view looks like (screenshot walkthrough).
 - [ ] Sandbox funding confirmed; verify NO real payment method is attached anywhere.
 - [ ] ⏱ start of manual chat-opening: ______
-- [ ] Dashboard: open new Linq conversation to spender's number. **[verify against
+- [ ] ~~Dashboard: open new Linq conversation to spender's number.~~ **No longer
+      needed** — `steward` opens the conversation itself on the first message
+      (verified 2026-08-02). The scripted first message carrying the bot
+      disclosure *is* what opens the thread. **[was: verify against
       repo — enumerate actual steps 1..n here]**
 - [ ] Scripted first message sent (must contain the bot disclosure — see below).
 - [ ] Spender confirms receipt on their handset (text or call confirmation).

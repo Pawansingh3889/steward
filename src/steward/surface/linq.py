@@ -19,12 +19,28 @@ from: end-to-end delivery p50 2.65s and p99 4.50s, API p99 700ms. Twenty seconds
 is generous, and generous is right — a message that is slow is still wanted,
 whereas a retry is a second text to somebody's phone.
 
-**Chat creation is still unverified.** `POST /chats` rejects every body shape
-probed against it, and the public guides document sending into an existing chat
-without showing how one is opened. So `send` finds a chat and refuses clearly if
-there is not one, rather than pretending. Opening a conversation with somebody
-new is the one thing this adapter cannot yet do, and saying so is more use than
-a plausible-looking call that 400s the first time a real person needs it.
+**Opening a conversation works too**, verified 2026-08-02. It took a while to
+find because the error messages point away from the answer: every wrong shape
+returns `1005`, and `1005` is documented as "a parameter value fails
+validation", which reads like a bad phone number rather than a wrong field name.
+The tell was that one variant complained about something *else* —
+
+    {"from": …, "recipients": […]}  →  1005 at least 1 recipient is required
+    {"from": …, "to":         […]}  →  1005 at least one message part is required
+
+— which is how `to` was identified. The second error is the real surprise:
+**opening a chat sends the first message in the same call.** That is not an
+API quirk to work around, it is how the medium works — you cannot open an
+iMessage thread with somebody without saying something to them.
+
+    POST /chats  {"from": "+1…", "to": ["+44…"],
+                  "message": {"parts": [{"type": "text", "value": …}]}}
+
+It is idempotent: called for somebody you already have a conversation with, it
+returns that conversation rather than starting a second one. So `send` looks for
+a chat, and opens one carrying the message when there is not one — which means
+the caller never has to know which case it was in, and a first message is never
+sent twice.
 
 **Dry-run by default**, still. A text reaches a real person, cannot be recalled,
 and may cost money. `STEWARD_LINQ_LIVE=1` is the opt-in; without it this
@@ -80,6 +96,38 @@ def text_message(body: str) -> dict[str, Any]:
     return {"message": {"parts": [{"type": "text", "value": body}]}}
 
 
+def open_chat(to: str, body: str, *, token: str, base: str, client: httpx.Client) -> dict[str, Any]:
+    """Open a conversation, carrying the first message.
+
+    The message is not optional — `POST /chats` refuses without one, and that is
+    the medium being honest rather than the API being awkward: an iMessage
+    thread does not exist until something has been said in it.
+
+    Idempotent on Linq's side. Calling this for somebody who already has a
+    conversation returns theirs, so a race between two sends cannot leave a
+    person with two threads.
+    """
+    sender = config.linq_from_number()
+    if not sender:
+        raise LinqError(
+            "LINQ_FROM_NUMBER is unset — a new conversation needs a line to come from"
+            " (GET /phone_numbers lists the ones this account owns)"
+        )
+    response = client.post(
+        f"{base}/chats",
+        headers=_headers(token),
+        json={"from": sender, "to": [to], **text_message(body)},
+    )
+    if response.status_code >= 400:
+        raise LinqError(
+            f"could not open a chat with {to}: {response.status_code} {response.text[:300]}"
+        )
+    chat = response.json().get("chat")
+    if not isinstance(chat, dict):
+        raise LinqError(f"Linq opened a chat but returned no chat object: {response.text[:200]}")
+    return chat
+
+
 @dataclass
 class LinqChannel:
     """Sends over Linq when told to, and describes itself honestly when not."""
@@ -110,15 +158,12 @@ class LinqChannel:
         try:
             chat = find_chat(to, token=token, base=base, client=client)
             if chat is None:
-                # See the module docstring: opening a conversation is the one
-                # thing this cannot do yet, and it says so rather than guessing.
-                return Delivery(
-                    outbound,
-                    to,
-                    False,
-                    f"no existing Linq chat with {to}, and opening one is not implemented —"
-                    " start the conversation from the Linq dashboard first",
-                )
+                # Opening the conversation *is* sending the message — see the
+                # module docstring. Returning here rather than falling through
+                # is what stops a first message going twice.
+                opened = open_chat(to, outbound.body, token=token, base=base, client=client)
+                service = str(opened.get("service", "")) or "unknown protocol"
+                return Delivery(outbound, to, True, f"opened a chat and sent over {service}")
             response = client.post(
                 f"{base}/chats/{chat['id']}/messages",
                 headers=_headers(token),

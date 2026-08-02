@@ -127,9 +127,13 @@ Verified against a database created before these columns existed: columns added,
 
 Confirmed against the live Linq API and dashboard on 2026-08-02:
 
-- Opening a new chat from the API is **not possible with what is documented**;
-  `POST /chats` rejects every body shape probed. The manual dashboard step in
-  the runbook is therefore load-bearing, not a convenience.
+- Opening a new chat from the API **works**, verified 2026-08-02. The manual
+  dashboard step in the runbook is no longer needed: `POST /chats` with
+  `{"from", "to": [...], "message": {...}}` opens the conversation *and* sends
+  the first message, and is idempotent for somebody who already has one. The
+  runbook's onboarding call can now be a scripted send rather than ten manual
+  steps per pair — which removes the failure mode it warned about, that doing
+  them from memory is where a step goes missing.
 - Once a chat exists, sending works and is verified end to end — one message
   delivered to a real handset over iMessage.
 - The account's sending line is a **US number** (+1 206). The verified test
@@ -180,6 +184,5 @@ reasoning about one:
 
 ## What is still genuinely unverified
 
-- **Opening a Linq chat programmatically.**
 - **Google Calendar and Gmail**, which have no live token.
 - **SMS fallback** for a recipient without iMessage.
