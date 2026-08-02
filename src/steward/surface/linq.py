@@ -14,6 +14,11 @@ between the account's handle and one or more others, and it carries the protocol
 — the sandbox chat negotiated iMessage, so a message sent through here arrives
 as a blue bubble rather than an SMS. Linq picks that; steward does not ask.
 
+Measured on the sandbox at the same time, which is where the timeout below comes
+from: end-to-end delivery p50 2.65s and p99 4.50s, API p99 700ms. Twenty seconds
+is generous, and generous is right — a message that is slow is still wanted,
+whereas a retry is a second text to somebody's phone.
+
 **Chat creation is still unverified.** `POST /chats` rejects every body shape
 probed against it, and the public guides document sending into an existing chat
 without showing how one is opened. So `send` finds a chat and refuses clearly if
