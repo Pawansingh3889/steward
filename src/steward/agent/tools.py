@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import store
+from ..catalogue import search
+from ..extract.eta import Point
 from ..memory import recall
 from ..models import FactKind
 from ..spend import purchase
@@ -77,6 +79,37 @@ SPECS: list[dict[str, Any]] = [
         "The last few turns of this conversation, oldest first. Use it when the"
         " person refers back to something without repeating it.",
         {"limit": {"type": "integer", "description": "how many turns, default 20"}},
+    ),
+    _spec(
+        "find_options",
+        "Find what is available for something the person needs, with the price"
+        " and how long delivery takes. ALWAYS show them every option returned,"
+        " with both numbers, and ask which they want — do not pick for them and"
+        " do not quietly drop the expensive or the slow one. Cheapest is not"
+        " best when someone has run out today. Every result is from a modelled"
+        " FIXTURE catalogue; say so.",
+        {
+            "query": {
+                "type": "string",
+                "description": "what they need, in their words, e.g. 'soap'",
+            },
+            "limit": {"type": "integer", "description": "how many, default 6"},
+        },
+    ),
+    _spec(
+        "buy_offer",
+        "Buy one option the person chose, by its offer_id from find_options."
+        " Pass price_cents exactly as it was shown to them: if it no longer"
+        " matches the catalogue the purchase is refused, because their"
+        " agreement was to a price, not to whatever it now costs. Only call"
+        " this after they have chosen — never to save them a step.",
+        {
+            "offer_id": {"type": "string", "description": "offer_id from find_options"},
+            "price_cents": {
+                "type": "integer",
+                "description": "the price_cents you showed them for this offer",
+            },
+        },
     ),
     _spec(
         "request_purchase",
@@ -209,6 +242,56 @@ class ToolBox:
         )
         self.writes_log.append({"action": "remember", "kind": kind, "key": key})
         return {"fact_id": fact_id, "stored": True, "kind": kind, "key": key}
+
+    def _destination(self) -> Point | None:
+        """Roughly where this person is, for the delivery estimate.
+
+        Read here and passed straight into the distance model, which returns
+        days. The coordinate itself never enters a tool result, so it has no
+        route to the model — see extract/eta.py for why even a distance would
+        be too much.
+        """
+        person = store.get_person(self.person_id, db_path=self.db_path)
+        if person is None or person["home_lat"] is None or person["home_lon"] is None:
+            return None
+        return Point(float(person["home_lat"]), float(person["home_lon"]))
+
+    def _tool_find_options(self, query: str = "", limit: int = 6) -> dict[str, Any]:
+        if not query:
+            return {"error": "query is required"}
+        offers = search.find(
+            query, destination=self._destination(), limit=_clamp(limit, 6, ceiling=12)
+        )
+        if not offers:
+            return {
+                "options": [],
+                "count": 0,
+                "note": f"nothing in the catalogue matches {query!r}",
+            }
+        return {
+            "options": [offer.as_dict() for offer in offers],
+            "count": len(offers),
+            "note": "show ALL of these with price and delivery, and ask which they want",
+        }
+
+    def _tool_buy_offer(self, offer_id: str = "", price_cents: int = 0) -> dict[str, Any]:
+        if not offer_id or price_cents <= 0:
+            return {"error": "offer_id and the price_cents you showed them are required"}
+        try:
+            # The authoritative price comes from the catalogue, not from the
+            # model. This is the line that stops a misremembered number from
+            # becoming the number the policy engine evaluates and the person pays.
+            offer = search.quote(offer_id, int(price_cents), destination=self._destination())
+        except search.PriceMoved as exc:
+            return {"error": str(exc), "verdict": "price_moved", "recheck": True}
+        return self._tool_request_purchase(
+            description=offer.name,
+            amount_cents=offer.price_cents,
+            currency=offer.currency,
+            merchant_name=offer.supplier_name,
+            merchant_url=offer.supplier_url,
+            merchant_country=offer.supplier_country,
+        )
 
     def _tool_request_purchase(
         self,

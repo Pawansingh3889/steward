@@ -19,8 +19,10 @@ from typing import Any
 
 from . import config, store
 from .agent import llm
+from .catalogue import search
 from .extract import pipeline
 from .extract.base import INFERRED
+from .extract.eta import Point
 from .memory import recall
 from .models import FactKind, Role
 from .spend import purchase, warden
@@ -241,6 +243,60 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- the catalogue -----------------------------------------------------------
+
+
+def cmd_shop(args: argparse.Namespace) -> int:
+    """What is available, with price and delivery. Buys nothing."""
+    person = _resolve_person(args)
+    destination = None
+    if person["home_lat"] is not None and person["home_lon"] is not None:
+        destination = Point(float(person["home_lat"]), float(person["home_lon"]))
+    offers = search.find(args.query, destination=destination, limit=args.limit)
+    if args.json:
+        _out(json.dumps([offer.as_dict() for offer in offers], indent=2))
+        return 0
+    if not offers:
+        _out(f"nothing in the catalogue matches {args.query!r}.")
+        return 1
+    _out(f"\n{BOLD}options for {args.query!r}{RESET}  {DIM}[{search.LABEL} catalogue]{RESET}\n")
+    for offer in offers:
+        arrival = offer.delivery.describe() if offer.delivery else "delivery time unknown"
+        _out(
+            f"  {offer.offer_id:<22} {offer.name:<30}"
+            f" {BOLD}{_money(offer.price_cents, offer.currency)}{RESET}"
+        )
+        _out(f"  {'':<22} {DIM}{offer.supplier_name} · {arrival}{RESET}")
+    if destination is None:
+        _out(
+            f"\n{DIM}no delivery estimates: steward does not know where you are."
+            f"\n  steward people locate --lat 51.5074 --lon -0.1278{RESET}"
+        )
+    _out()
+    return 0
+
+
+def cmd_people_locate(args: argparse.Namespace) -> int:
+    """Set roughly where someone is, for delivery estimates.
+
+    The coordinate stays in the database and is read by one module. What the
+    model is ever told is "arrives in about two days".
+    """
+    person = _resolve_person(args)
+    if args.forget:
+        store.set_home_location(int(person["id"]), None, None, db_path=args.db)
+        _out(f"forgotten where {person['name']} is.")
+        return 0
+    if args.lat is None or args.lon is None:
+        raise SystemExit("pass --lat and --lon, or --forget")
+    store.set_home_location(int(person["id"]), args.lat, args.lon, db_path=args.db)
+    _out(f"noted roughly where {person['name']} is.")
+    _out(
+        f"{DIM}used for delivery estimates only; the model is told days, never coordinates.{RESET}"
+    )
+    return 0
+
+
 # --- spending ----------------------------------------------------------------
 
 
@@ -378,6 +434,19 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--phone", default="")
     add.add_argument("--email", default="")
     add.set_defaults(func=cmd_people_add)
+
+    locating = people.add_parser("locate", help="set roughly where someone is")
+    _add_person_flags(locating)
+    locating.add_argument("--lat", type=float, default=None)
+    locating.add_argument("--lon", type=float, default=None)
+    locating.add_argument("--forget", action="store_true", help="clear it")
+    locating.set_defaults(func=cmd_people_locate)
+
+    shopping = sub.add_parser("shop", help="what is available, with price and delivery")
+    _add_person_flags(shopping)
+    shopping.add_argument("query")
+    shopping.add_argument("--limit", type=int, default=6)
+    shopping.set_defaults(func=cmd_shop)
 
     memory = sub.add_parser("memory", help="inspect and correct what is held about you")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

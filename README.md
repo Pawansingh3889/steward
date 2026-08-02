@@ -15,8 +15,21 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 3 of 8. A purchase can be blocked, escalated to the sponsor, approved and
-paid — with policy, not steward, deciding at every step.
+Phase 4 of 8. "I'm out of soap" → options with price and delivery → the person
+chooses → policy decides → settled.
+
+```
+$ steward shop soap
+
+options for 'soap'  [FIXTURE catalogue]
+
+  cornershop:cs-soap-1   Hand Soap, 500ml               £4.20 GBP
+                         Corner Shop Express · arrives tomorrow
+  everyday:ev-soap-2     Hand Soap Refill, 2 × 500ml    £3.80 GBP
+                         Everyday Goods · arrives in about 2 days
+  bulkline:bl-soap-2     Hand Soap, 2 × 500ml           £3.20 GBP
+                         Bulkline Direct · arrives in about 3 days
+```
 
 ```
 $ steward memory list --person 2
@@ -126,6 +139,34 @@ and a policy engine that cannot be reached is not permission either. Relatedly,
 also appear in pay-warden's policy as `steward:person_<id>`, or every request is
 denied with `unknown-agent`. Surprising the first time; correct.
 
+## The agent finds the options; the person picks
+
+Autonomy lives in enforcement and payment, not in selection. `find_options`
+returns **every** match with price and delivery — never a shortlist of one — and
+the tool that spends money takes an `offer_id`, so buying is a separate act from
+searching. An agent that quietly bought the cheapest would be making a values
+judgement on someone's behalf: cheapest is not best when you have run out today.
+
+Every option is on the Pareto frontier — cheaper, or faster, or both. A test
+enforces it, and it caught the first draft of the catalogue, where one supplier
+happened to be cheapest *and* fastest for soap and there was no decision to make.
+
+**The model does not set the price.** `buy_offer` re-reads the price from the
+catalogue and refuses if it differs from what the person was shown — canibuy's
+`pricestage.py` idea, for the same reason: the number reaching the policy engine
+must be the number the merchant will charge. A misremembered £4.05 fails loudly
+instead of quietly becoming what someone pays.
+
+Delivery is modelled from the supplier's location and the person's, locally.
+Coordinates live in two columns read by one module; what the model is told is
+"arrives in about 2 days". With no location set, offers say *delivery time
+unknown* rather than guessing — and that answer sorts last, not first.
+
+The catalogue is modelled and labelled `FIXTURE` on every surface. That is the
+honest form of a real finding: canibuy graded the open web for agent-readiness
+and the best merchant scored **C**, most scored **F**, and none sell household
+essentials. Phase 7 swaps live fetching in for any merchant that grades well.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -161,6 +202,9 @@ src/steward/
     embed.py       local, dependency-free vectors
     episodic.py    what was said, searchable by resemblance
     recall.py      "what do you know about me?", answered once for all surfaces
+  catalogue/
+    fixtures.py    the modelled storefront, and why it is modelled
+    search.py      offers, ordering, and price integrity at purchase
   spend/
     warden.py      the MCP client to pay-warden; the only path to money
     purchase.py    blocked / escalated / approved / paid

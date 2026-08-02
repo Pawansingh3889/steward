@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS people (
   sponsor_id INTEGER REFERENCES people(id),
   phone TEXT NOT NULL DEFAULT '',
   email TEXT NOT NULL DEFAULT '',
+  -- Roughly where they are, for estimating how long a delivery takes. Kept in
+  -- its own columns rather than as facts on purpose: a coordinate is the one
+  -- input the plan promises never crosses to the model, and it is easier to
+  -- guarantee that about two columns read by one module than about a row in a
+  -- table everything reads. NULL means unknown, which the catalogue reports as
+  -- "delivery time unknown" rather than guessing.
+  home_lat REAL,
+  home_lon REAL,
   created_ts TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS facts (
@@ -178,6 +186,8 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("facts", "pending", "INTEGER NOT NULL DEFAULT 0"),
     ("facts", "confirmed_ts", "TEXT NOT NULL DEFAULT ''"),
+    ("people", "home_lat", "REAL"),
+    ("people", "home_lon", "REAL"),
 )
 
 # Indexes this version replaced. Dropped by name before the new ones are
@@ -286,6 +296,20 @@ def person_by_phone(phone: str, db_path: str | None = None) -> dict[str, Any] | 
     """How an inbound text finds its sender."""
     with transaction(db_path) as conn:
         return _row(conn.execute("SELECT * FROM people WHERE phone = ?", (phone,)))
+
+
+def set_home_location(
+    person_id: int, latitude: float | None, longitude: float | None, db_path: str | None = None
+) -> None:
+    """Set or clear roughly where someone is. Passing None for both forgets it,
+    which has to be as easy as setting it."""
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE people SET home_lat = ?, home_lon = ? WHERE id = ?",
+            (latitude, longitude, person_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no person {person_id}")
 
 
 def list_people(db_path: str | None = None) -> list[dict[str, Any]]:
