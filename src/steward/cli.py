@@ -862,6 +862,74 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lan_address() -> str:
+    """This machine's address on the local network.
+
+    Opens a UDP socket to a routable address and asks the kernel which
+    interface it would use. Nothing is sent — UDP needs no handshake — so this
+    works with no network as long as a route exists.
+    """
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # TEST-NET-1: reserved, never routed
+        return str(probe.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        probe.close()
+
+
+def cmd_console(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from .web.console import Console, build_console_app
+
+    host = "127.0.0.1"
+    base = f"http://127.0.0.1:{args.port}"
+    if args.lan:
+        address = _lan_address()
+        if not address:
+            raise SystemExit("could not work out this machine's address on the local network")
+        host, base = "0.0.0.0", f"http://{address}:{args.port}"
+
+    console = Console(db_path=args.db)
+    sponsor, spenders = console.people()
+    if sponsor is None or not spenders:
+        raise SystemExit(
+            "this database has no sponsor with a spender —"
+            " run scripts/seed_demo.py or scripts/demo.py --keep first"
+        )
+
+    _out(f"\n{BOLD}steward console{RESET}          {DIM}two lines, one machine{RESET}\n")
+    _out(f"  {DIM}spender{RESET}    {spenders[0]['name']}   {base}/spender")
+    _out(f"  {DIM}sponsor{RESET}    {sponsor['name']}   {base}/sponsor")
+    _out(f"  {DIM}both{RESET}       {base}\n")
+
+    if args.lan:
+        # Loud, because it is the one thing here that is genuinely a risk. This
+        # page can spend money: it drives the real agent and the real policy
+        # engine, and it has no login. On a home or conference network that is
+        # a demo; on an untrusted one it is somebody else's shopping trip.
+        _out(
+            f"  {BOLD}this is reachable by anything on your network, and it can spend"
+            f"{RESET}\n  {DIM}no login — leave it running only while you are demonstrating{RESET}\n"
+        )
+        import segno
+
+        for role in ("spender", "sponsor"):
+            _out(f"  {DIM}{role}{RESET}")
+            segno.make(f"{base}/{role}", error="m").terminal(compact=True)
+    else:
+        _out(f"  {DIM}--lan binds every interface and prints a QR code for each line{RESET}\n")
+
+    uvicorn.run(
+        build_console_app(console, base_url=base), host=host, port=args.port, log_level="warning"
+    )
+    return 0
+
+
 # --- ask ---------------------------------------------------------------------
 
 
@@ -1143,6 +1211,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serving.add_argument("--port", type=int, default=0, help="override $STEWARD_WEB_PORT")
     serving.set_defaults(func=cmd_serve)
+
+    console = sub.add_parser("console", help="a demo console standing in for the phone network")
+    console.add_argument("--port", type=int, default=8788)
+    console.add_argument(
+        "--lan",
+        action="store_true",
+        help="bind every interface and print a QR per line, so phones can join",
+    )
+    console.set_defaults(func=cmd_console)
 
     asking = sub.add_parser("ask", help="ask the agent something")
     _add_person_flags(asking)

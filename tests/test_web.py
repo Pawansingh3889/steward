@@ -586,6 +586,10 @@ def unescaped_interpolations(path: Path) -> list[str]:
     Three things are allowed inside markup: a constant, a name ending in
     `_html` (the convention that says "this is markup, not data"), and a call to
     an escaping helper or to a function whose own name ends in `_html`.
+
+    The suffix is matched case-insensitively, so a module constant holding a
+    block of markup can be `SCRIPT_HTML` and still read as shouting. The
+    convention is about what the name promises, not how it is cased.
     Deliberately absent: `money`. It interpolates a database-sourced currency
     into its own output, so `render.money_text` is the safe one.
     """
@@ -604,9 +608,9 @@ def unescaped_interpolations(path: Path) -> list[str]:
                 continue
             if isinstance(value, ast.Call):
                 name = _final_name(value.func)
-                if name in ESCAPING_HELPERS or name.endswith("_html"):
+                if name in ESCAPING_HELPERS or name.lower().endswith("_html"):
                     continue
-            elif _final_name(value).endswith("_html"):
+            elif _final_name(value).lower().endswith("_html"):
                 continue
             offenders.append(f"{path.name}:{part.lineno} {ast.unparse(value)}")
     return offenders

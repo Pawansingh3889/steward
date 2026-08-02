@@ -232,3 +232,104 @@ td:last-child, th:last-child { padding-right: 0; }
 .plan-items li { margin-bottom: 2px; }
 .books-it { color: var(--ink-faint); font-size: .8125rem; }
 """
+
+# --- the demo console ---------------------------------------------------------
+# Two phone lines side by side. Deliberately unlike the sponsor dashboard: that
+# one is a report, this one is a rehearsal, and they should not be mistaken for
+# each other in a screenshot.
+STYLESHEET += """
+.lines { display: grid; gap: 18px; grid-template-columns: 1fr 1fr; align-items: start; }
+@media (max-width: 860px) { .lines { grid-template-columns: 1fr; } }
+.line {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.line-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 13px 16px; border-bottom: 1px solid var(--line); background: var(--panel-sunken);
+}
+.line-who { font-weight: 600; }
+.line-num { font-family: var(--mono); font-size: .8125rem; color: var(--ink-faint); }
+.thread { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+          min-height: 260px; max-height: 52vh; overflow-y: auto; }
+.bubble { max-width: 85%; border-radius: 14px; padding: 9px 13px; font-size: .9375rem; }
+.bubble p { margin: 0; }
+.bubble-who { font-size: .75rem; color: var(--ink-faint); margin-bottom: 3px; }
+/* The person typing is on the right, steward on the left — the arrangement a
+   phone uses, so nobody has to be told which side is which. */
+.bubble.them { align-self: flex-end; background: var(--accent); color: #fff; }
+.bubble.them .bubble-who { color: rgba(255,255,255,.75); }
+.bubble.agent { align-self: flex-start; background: var(--panel-sunken); border: 1px solid var(--line); }
+.composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.composer input {
+  flex: 1; font: inherit; font-size: .9375rem; color: var(--ink);
+  background: var(--panel-sunken); border: 1px solid var(--line-strong);
+  border-radius: 9px; padding: 9px 12px;
+}
+.composer button, .acts button {
+  font: inherit; font-size: .875rem; font-weight: 600; cursor: pointer;
+  border-radius: 9px; padding: 9px 15px; border: 1px solid var(--line-strong);
+  background: var(--panel-sunken); color: var(--ink);
+}
+.composer button:hover, .acts button:hover { border-color: var(--accent); color: var(--accent); }
+.controls { margin-top: 18px; }
+.pending {
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 16px 18px; box-shadow: var(--shadow);
+}
+.acts { display: flex; gap: 9px; margin-top: 12px; }
+.acts .yes { border-color: var(--good-line); color: var(--good-ink); background: var(--good-bg); }
+.acts .no { border-color: var(--line-strong); }
+.thinking { color: var(--ink-faint); font-size: .875rem; padding: 0 16px 12px; }
+"""
+
+# --- handsets -----------------------------------------------------------------
+# One page, three platforms. Nothing here branches on the OS: the only genuinely
+# platform-specific rules are iOS's, and both of them are harmless everywhere
+# else, which is the whole argument for not writing two pages.
+STYLESHEET += """
+html {
+  /* Safari resizes text in landscape unless told not to. */
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  /* Keeps content clear of the notch and the home indicator. Zero on anything
+     that has neither, so Android and desktop are untouched. */
+  padding-left: max(24px, env(safe-area-inset-left));
+  padding-right: max(24px, env(safe-area-inset-right));
+  padding-bottom: max(64px, env(safe-area-inset-bottom));
+}
+.composer input {
+  /* Exactly 16px, and not a rem less. Mobile Safari zooms the whole page when a
+     focused input is smaller than this, which on a chat box means every reply
+     leaves the viewport mid-conversation. */
+  font-size: 16px;
+}
+.composer button, .acts button {
+  /* Both platforms' guidance lands near the same number for a tap target. */
+  min-height: 44px; min-width: 44px;
+}
+.banner.solo h1 { font-size: 1.375rem; }
+.lines.solo { grid-template-columns: 1fr; }
+.lines.solo .thread { max-height: none; min-height: 55vh; }
+
+@media (max-width: 620px) {
+  .page { padding-top: 20px; }
+  .thread { padding: 12px; }
+  .bubble { max-width: 92%; }
+  .line-head { padding: 11px 12px; }
+  .composer { padding: 10px 12px; }
+  .card, .panel { padding: 14px; }
+  h1 { font-size: 1.375rem; }
+}
+
+/* The QR pair, shown on the desktop page so a phone can join by pointing at it. */
+.join { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 18px; }
+.join figure { margin: 0; text-align: center; }
+.join img {
+  width: 168px; height: 168px; display: block;
+  background: #fff; padding: 9px; border-radius: 10px; border: 1px solid var(--line);
+}
+.join figcaption { margin-top: 8px; font-size: .8125rem; color: var(--ink-soft); }
+.join code { font-family: var(--mono); font-size: .75rem; color: var(--ink-faint); }
+"""
