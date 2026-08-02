@@ -142,7 +142,20 @@ def parse_events(text: str) -> list[Event]:
 
 
 def extract(raw: str, *, horizon_days: int = 120, today: date | None = None) -> list[Candidate]:
-    """Calendar file in, schedule facts out.
+    """Calendar file in, schedule facts out."""
+    return candidates_from(parse_events(raw), horizon_days=horizon_days, today=today)
+
+
+def candidates_from(
+    events: list[Event], *, horizon_days: int = 120, today: date | None = None
+) -> list[Candidate]:
+    """Events in, schedule facts out — whatever produced the events.
+
+    A `.ics` file and a Google Calendar API response are different formats of
+    the same thing, and both arrive here. That is deliberate: this function is
+    the only place that decides what a calendar is allowed to contribute, so
+    adding a second source cannot accidentally add a second, laxer policy about
+    locations and attendees. A new integration parses into `Event` and stops.
 
     Past events are dropped and distant ones ignored: memory is for deciding
     what to do next, and an agent reasoning about last March's dentist
@@ -153,7 +166,7 @@ def extract(raw: str, *, horizon_days: int = 120, today: date | None = None) -> 
     # changes nothing — and `today=` is injectable so tests never depend on it.
     now = today or datetime.now(UTC).date()
     candidates: list[Candidate] = []
-    for event in parse_events(raw):
+    for event in events:
         if event.start < now:
             continue
         if (event.start - now).days > horizon_days:

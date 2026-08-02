@@ -106,6 +106,25 @@ def linq_live() -> bool:
     return _str("STEWARD_LINQ_LIVE").lower() in ("1", "true", "yes", "on")
 
 
+def google_access_token() -> str:
+    """A short-lived token the operator obtained. steward runs no consent flow:
+    an OAuth dance is the account owner's to perform, and a program that asks
+    for one is a program asking to be trusted with a client secret."""
+    return _str("GOOGLE_ACCESS_TOKEN")
+
+
+def google_refresh_token() -> str:
+    return _str("GOOGLE_REFRESH_TOKEN")
+
+
+def google_client_id() -> str:
+    return _str("GOOGLE_CLIENT_ID")
+
+
+def google_client_secret() -> str:
+    return _str("GOOGLE_CLIENT_SECRET")
+
+
 def pay_warden_command() -> list[str]:
     """How to launch pay-warden as an MCP subprocess.
 
@@ -146,5 +165,10 @@ def secret_values() -> tuple[str, ...]:
         openai_api_key(),
         linq_token(),
         _str("PRAVA_SECRET_KEY"),
+        # Google's tokens read a person's calendar and mail. If one ever reached
+        # a model prompt the send-time assert must stop it, like any other key.
+        google_access_token(),
+        google_refresh_token(),
+        google_client_secret(),
     )
     return tuple(value for value in values if value)

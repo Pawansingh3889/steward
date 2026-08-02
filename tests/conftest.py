@@ -38,8 +38,14 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make a real socket impossible, rather than merely unlikely.
+
+    A test marked `@pytest.mark.live` opts out. That marker is the only way to
+    reach the network from this suite, it has to be written on the test itself,
+    and grepping for it lists every test that can — which is the property that
+    matters. Those tests are also skipped unless their own environment variable
+    is set, so the default run still cannot touch anything.
 
     The unregistrable hosts above stop a leak from reaching anyone, but it would
     still fail as a DNS error somewhere confusing. This turns any un-mocked
@@ -48,6 +54,8 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     Starlette's TestClient uses ASGITransport and httpx.MockTransport is its own
     class, so neither is affected.
     """
+    if request.node.get_closest_marker("live"):
+        return
 
     def deny(self: object, request: object, *args: object, **kwargs: object) -> None:
         raise RuntimeError(

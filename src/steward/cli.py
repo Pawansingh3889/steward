@@ -24,6 +24,8 @@ from .catalogue import search
 from .extract import pipeline
 from .extract.base import INFERRED
 from .extract.eta import Point
+from .integrations import prices, sync
+from .integrations.google import GoogleError
 from .memory import recall
 from .models import FactKind, Role, money
 from .plan import goals, schedule
@@ -573,6 +575,92 @@ def cmd_plan_contribute(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- integrations --------------------------------------------------------------
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    """Read a Google account and keep only the facts.
+
+    What prints is a count and what was learned. Deliberately never the mail or
+    the events themselves — a surface that echoed somebody's inbox back at them
+    would undo the point of reading it locally.
+    """
+    person = _resolve_person(args)
+    try:
+        if args.source == "calendar":
+            result = sync.pull_calendar(int(person["id"]), db_path=args.db)
+            read = f"{result['events_read']} events"
+        else:
+            result = sync.pull_mail(int(person["id"]), limit=args.limit, db_path=args.db)
+            read = f"{result['messages_read']} messages"
+    except GoogleError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        _out(json.dumps(result, indent=2))
+        return 0
+    _out(f"{DIM}read {read}{RESET}")
+    if not result["facts"]:
+        _out("nothing durable to learn from that.")
+        return 0
+    waiting = 0
+    for fact in result["facts"]:
+        waiting += fact["pending"]
+        _out(f"  {fact['kind']:<10} {fact['key']:<26} {fact['value']}")
+    if waiting:
+        _out(f"\n{DIM}{waiting} waiting for you to confirm:  steward memory list{RESET}")
+    return 0
+
+
+def cmd_trip_from_calendar(args: argparse.Namespace) -> int:
+    """Propose a trip plan sized to the next away event in the calendar."""
+    person = _resolve_person(args)
+    try:
+        plan = sync.trip_from_calendar(
+            int(person["id"]), target_cents=args.target_cents, db_path=args.db
+        )
+    except (GoogleError, PlanError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if plan is None:
+        _out("nothing in the calendar that looks like a trip.")
+        return 1
+    _out(
+        f"\n{DIM}from your calendar: {plan['from_calendar']['summary']}"
+        f" departs {plan['from_calendar']['departs']}{RESET}"
+    )
+    _show_plan(plan)
+    _ways(plan)
+    _out(
+        f"\n{DIM}it does nothing until you start it:  steward plan activate --id"
+        f" {plan['plan_id']}{RESET}\n"
+    )
+    return 0
+
+
+def cmd_price(args: argparse.Namespace) -> int:
+    """Read a price off a real product page, if it publishes one."""
+    try:
+        found = prices.fetch(args.url)
+    except prices.PriceError as exc:
+        raise SystemExit(str(exc)) from exc
+    if found is None:
+        _out(f"{DIM}{args.url} publishes no structured price.{RESET}")
+        _out(
+            f"{DIM}steward will not scrape one from the visible text — a number nobody"
+            f" promised is not a price. This merchant stays modelled.{RESET}"
+        )
+        return 1
+    if args.json:
+        _out(json.dumps(found.as_dict(), indent=2))
+        return 0
+    _out(
+        f"  {BOLD}{_money(found.price_cents, found.currency)}{RESET}"
+        f"  {DIM}via {found.source}"
+        f"{' · ' + found.availability if found.availability else ''}{RESET}"
+    )
+    return 0
+
+
 # --- approvals ---------------------------------------------------------------
 
 
@@ -834,6 +922,21 @@ def build_parser() -> argparse.ArgumentParser:
     plan_put.add_argument("--id", type=int, required=True)
     plan_put.add_argument("--amount-cents", type=int, required=True, dest="amount_cents")
     plan_put.set_defaults(func=cmd_plan_contribute)
+
+    pulling = sub.add_parser("pull", help="read a connected Google account")
+    _add_person_flags(pulling)
+    pulling.add_argument("source", choices=("calendar", "mail"))
+    pulling.add_argument("--limit", type=int, default=20, help="messages, for mail")
+    pulling.set_defaults(func=cmd_pull)
+
+    tripping = sub.add_parser("trip", help="plan for the next trip in your calendar")
+    _add_person_flags(tripping)
+    tripping.add_argument("--target-cents", type=int, required=True, dest="target_cents")
+    tripping.set_defaults(func=cmd_trip_from_calendar)
+
+    pricing = sub.add_parser("price", help="read a price off a real product page")
+    pricing.add_argument("url")
+    pricing.set_defaults(func=cmd_price)
 
     approvals = sub.add_parser("approvals", help="purchases waiting on a sponsor")
     approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)

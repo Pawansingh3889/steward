@@ -15,8 +15,8 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 6 of 8. Plans a person shaped — and steward is honest when the numbers
-do not work.
+Phase 7 of 8. A real calendar drives a real plan, and real prices are read where
+merchants publish them.
 
 ```
 $ steward plan propose --name Lisbon --kind trip \
@@ -285,6 +285,57 @@ in `store.py` from the item kind, so no layer above can clear it, and **nothing
 in `plan/` imports `spend/`** — there is no code path from a plan item to a
 payment at all, which a test enforces by reading the imports.
 
+## Real accounts, and how little of them is kept
+
+`integrations/` fetches and hands straight to `extract/`. Nothing there
+interprets, nothing stores raw material, and **`agent/` imports none of it** — a
+test reads the imports — so there is no path from somebody's inbox to a model
+prompt. Read-only scopes and read-only code: no send, no delete, no calendar
+write, asserted by a test that greps the module's own names.
+
+A Google Calendar event becomes the *same* `Event` type a `.ics` file produces
+and goes through the *same* `candidates_from`, which is the one place deciding
+what a calendar may contribute. So a second calendar source cannot arrive with a
+second, laxer policy about locations and attendees — a test proves both sources
+yield an identical fact from the same trip.
+
+Then the connective bit, and phase 7's point:
+
+```
+$ steward trip --target-cents 60000
+
+from your calendar: Family holiday in Lisbon departs 2026-09-12
+     1  Family holiday in Lisbon  [draft]
+        £150.00 GBP a month × 4 → £600.00 GBP by 2026-09-12
+```
+
+The calendar supplies the deadline; the person supplies what it is worth, and
+still starts it. Reading a holiday off a diary and committing money against it
+would be deciding, from a calendar entry, that somebody is definitely going.
+
+## Live prices, and what canibuy's grades actually predict
+
+`steward price <url>` reads **structured data only** — JSON-LD, then microdata.
+It never scrapes a number out of visible text, because a number nobody promised
+ends up in a policy decision and then on somebody's card. When a page does not
+publish one, the answer is *no price*, and the merchant stays modelled.
+
+Run against merchants canibuy graded (`STEWARD_LIVE_PRICES=1`, 2026-08-02):
+
+```
+adafruit.com          C    $35.00 via json-ld, InStock
+sparkfun.com          C     $7.50 via json-ld
+bluebottlecoffee.com  F    loads, no structured price → stays modelled
+```
+
+The grades still describe reality, checked from the other direction. That is
+kept as an opt-in test, so if it ever flips the argument for a modelled
+catalogue gets revisited rather than repeated.
+
+Reaching the network from the test suite requires `@pytest.mark.live` — the only
+way past the no-network guard, written on the test itself, so grepping for it
+lists every test that can.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -323,6 +374,10 @@ src/steward/
   catalogue/
     fixtures.py    the modelled storefront, and why it is modelled
     search.py      offers, ordering, and price integrity at purchase
+  integrations/
+    google.py      read-only calendar and mail; fetch, never interpret
+    prices.py      structured data only; None rather than a guess
+    sync.py        pull into extract/, and a trip plan from a diary
   plan/
     schedule.py    the arithmetic; honest when it does not add up
     goals.py       drafts, activation, and what a purchase costs a goal

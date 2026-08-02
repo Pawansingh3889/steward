@@ -28,3 +28,7 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The only way past the no-network guard in tests/conftest.py. Grep for it to
+# list every test that can reach the network; each is also skipped unless its
+# own environment variable is set.
+markers = ["live: reaches the real network; opt-in, never in a default run"]
