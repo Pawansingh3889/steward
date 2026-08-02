@@ -732,6 +732,57 @@ def test_the_contrast_check_can_actually_fail() -> None:
     assert contrast("#ffffff", "#1f4fd8") >= AA_TEXT
 
 
+# --- the scales --------------------------------------------------------------
+
+# The four literals that are allowed to sit outside the scales, and why. Each is
+# a constraint rather than a preference — see the module docstring.
+OFF_SCALE = {
+    ("font-size", "15px"),  # the base the rem scale is measured against
+    ("font-size", "16px"),  # below this, mobile Safari zooms the page on focus
+    ("padding", "1px"),  # a hairline on inline code; the scale starts at 2
+}
+
+
+def test_spacing_and_type_come_from_the_scales() -> None:
+    """A scale nothing is obliged to use is a suggestion.
+
+    The point of naming these was to make the vocabulary finite; a raw `13px`
+    dropped into a padding later puts back the value the merge just removed, and
+    nobody would notice until the file had two of everything again.
+    """
+    from steward.web import style
+
+    css = re.sub(r"/\*.*?\*/", "", style.STYLESHEET, flags=re.DOTALL)
+
+    loose = []
+    for prop, value in re.findall(r"([a-z-]+)\s*:\s*([^;{}]+)(?=;)", css):
+        if prop.startswith("--"):
+            continue
+        if not prop.startswith(("padding", "margin", "gap", "border-radius", "font-size")):
+            continue
+        family = prop.split("-")[0] if prop.startswith(("padding", "margin")) else prop
+        for number, unit in re.findall(r"(?<![\w.-])(\d*\.?\d+)(px|rem)", value):
+            if (family, f"{number}{unit}") not in OFF_SCALE:
+                loose.append(f"{prop}: {value}")
+
+    assert not loose, "raw values outside the scale: " + "; ".join(sorted(set(loose)))
+
+
+def test_that_scale_check_can_actually_fail() -> None:
+    """A fitness test nobody has seen fail is a comment."""
+    from steward.web import style
+
+    planted = style.STYLESHEET.replace(".empty { margin: 0;", ".empty { margin: 0 0 13px;", 1)
+
+    assert "margin: 0 0 13px" in planted  # the anchor still exists
+    found = [
+        value
+        for prop, value in re.findall(r"([a-z-]+)\s*:\s*([^;{}]+)(?=;)", planted)
+        if prop == "margin" and re.search(r"(?<![\w.-])13px", value)
+    ]
+    assert found, "the planted value would not have been caught"
+
+
 def test_the_accent_is_never_used_as_a_fill() -> None:
     """The split only holds while nothing paints a surface with the foreground
     token again. --accent behind white is 2.53:1 in dark mode."""
