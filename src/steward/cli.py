@@ -14,10 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import config, store
 from .agent import llm
+from .extract import pipeline
 from .memory import recall
 from .models import FactKind, Role
 
@@ -168,6 +170,40 @@ def cmd_memory_add(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- ingest ------------------------------------------------------------------
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Read a calendar, a bank alert or a message and learn from it.
+
+    Prints what *would* be learned under --dry-run, because handing a system
+    your calendar and finding out afterwards what it took is the wrong order.
+    """
+    person = _resolve_person(args)
+    raw = Path(args.file).read_text() if args.file else sys.stdin.read()
+
+    extraction = pipeline.extract_all(raw, use_local_model=not args.no_local_model)
+    if not args.dry_run:
+        pipeline.commit(int(person["id"]), extraction, db_path=args.db)
+
+    if args.json:
+        _out(json.dumps(extraction.as_dict(), indent=2))
+        return 0
+
+    _out(f"{DIM}read by: {extraction.extractor}{RESET}")
+    if extraction.degraded:
+        _out(f"{DIM}degraded: {extraction.degraded}{RESET}")
+    if not extraction.candidates:
+        _out("nothing durable to learn from that.")
+        return 0
+    verb = "would learn" if args.dry_run else "learned"
+    _out(f"\n{verb}:")
+    for candidate in extraction.candidates:
+        _out(f"  {candidate.kind:<10} {candidate.key:<24} {candidate.value}")
+        _out(f"  {DIM}{'':<10} source: {candidate.source}{RESET}")
+    return 0
+
+
 # --- ask ---------------------------------------------------------------------
 
 
@@ -241,6 +277,17 @@ def build_parser() -> argparse.ArgumentParser:
     adding.add_argument("--key", required=True)
     adding.add_argument("--value", required=True)
     adding.set_defaults(func=cmd_memory_add)
+
+    ingesting = sub.add_parser("ingest", help="learn from a calendar, alert or message")
+    _add_person_flags(ingesting)
+    ingesting.add_argument("--file", default="", help="path to read; omit to read stdin")
+    ingesting.add_argument(
+        "--dry-run", action="store_true", help="show what would be learned, store nothing"
+    )
+    ingesting.add_argument(
+        "--no-local-model", action="store_true", help="deterministic parsers only"
+    )
+    ingesting.set_defaults(func=cmd_ingest)
 
     asking = sub.add_parser("ask", help="ask the agent something")
     _add_person_flags(asking)

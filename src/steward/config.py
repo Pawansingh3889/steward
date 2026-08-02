@@ -15,6 +15,10 @@ DEFAULT_DB = "steward.sqlite3"
 DEFAULT_MODEL = "gpt-5"
 DEFAULT_OPENAI_BASE = "https://api.openai.com"
 DEFAULT_LINQ_BASE = "https://api.linqapp.com/api/partner/v3"
+# Loopback by default, and extract/local.py refuses to send raw text anywhere
+# that is not — see the reasoning there.
+DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_MODEL = "llama3.2"
 
 
 class ConfigError(RuntimeError):
@@ -56,6 +60,26 @@ def openai_api_base() -> str:
 
 def agent_model() -> str:
     return _str("STEWARD_AGENT_MODEL") or DEFAULT_MODEL
+
+
+def ollama_base() -> str:
+    """Where the local extraction model lives. Trailing slash stripped so the
+    loopback check in extract/local.py sees a clean host."""
+    return (_str("OLLAMA_BASE") or DEFAULT_OLLAMA_BASE).rstrip("/")
+
+
+def ollama_model() -> str:
+    return _str("OLLAMA_MODEL") or DEFAULT_OLLAMA_MODEL
+
+
+def local_llm_allow_remote() -> bool:
+    """Opt-in to sending unredacted text to a non-loopback Ollama.
+
+    Deliberately strict about what counts as yes. Someone who writes
+    `STEWARD_LOCAL_LLM_ALLOW_REMOTE=false` means no, and a truthiness check on a
+    non-empty string would read it as yes and ship their mail off the box.
+    """
+    return _str("STEWARD_LOCAL_LLM_ALLOW_REMOTE").lower() in ("1", "true", "yes", "on")
 
 
 def linq_token() -> str:
