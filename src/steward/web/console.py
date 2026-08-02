@@ -163,7 +163,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g,
 
 let busy = false;
 
-function draw(who, rows) {
+function draw(who, rows, force) {
   const el = document.getElementById("thread-" + who);
   if (!el) return;
   // Only redraw when something changed, or the thread scrolls itself back to
@@ -171,7 +171,10 @@ function draw(who, rows) {
   const signature = rows.map(r => r.seq).join(",");
   if (el.dataset.sig === signature) return;
   el.dataset.sig = signature;
-  const stuck = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  // Follow the conversation unless the reader has deliberately scrolled up.
+  // `force` is set right after you send: you asked the question, so you want
+  // the answer, and preserving your scroll position there hides it.
+  const stuck = force || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   el.innerHTML = rows.length ? rows.map(r =>
     `<div class="bubble ${r.inbound ? "them" : "agent"}">
        <div class="bubble-who">${esc(r.who)}</div><p>${esc(r.body)}</p></div>`).join("")
@@ -198,7 +201,7 @@ function drawPending(waiting) {
   el.querySelectorAll("[data-say]").forEach(b => { b.onclick = () => say("sponsor", b.dataset.say); });
 }
 
-async function refresh() {
+async function refresh(follow) {
   let s;
   try {
     const r = await fetch("/state");
@@ -206,8 +209,8 @@ async function refresh() {
     s = await r.json();
   } catch { return; }
   if (!s.ready) return;
-  draw("spender", s.spender);
-  draw("sponsor", s.sponsor);
+  draw("spender", s.spender, follow === "spender");
+  draw("sponsor", s.sponsor, follow === "sponsor");
   drawPending(s.waiting);
 }
 
@@ -243,7 +246,11 @@ async function say(who, text) {
     });
   } catch { /* the poll below will show whatever did land */ }
   thinking(false);
-  await refresh();
+  await refresh(who);
+  // The thread may sit below the fold on a long page; bring the answer to the
+  // reader rather than leaving them to find it.
+  const last = el && el.lastElementChild;
+  if (last) last.scrollIntoView({block: "nearest", behavior: "smooth"});
 }
 
 document.querySelectorAll("form.composer").forEach(form => {

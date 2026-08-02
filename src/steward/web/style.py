@@ -250,8 +250,11 @@ STYLESHEET += """
 }
 .line-who { font-weight: 600; }
 .line-num { font-family: var(--mono); font-size: .8125rem; color: var(--ink-faint); }
+/* No inner scrollbar by default. A thread inside its own scroll box means a new
+   reply can land below a fold the page gives you no sign of — which reads
+   exactly like the agent never answered. The page scrolls; the thread grows. */
 .thread { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
-          min-height: 260px; max-height: 52vh; overflow-y: auto; }
+          min-height: 200px; }
 .bubble { max-width: 85%; border-radius: 14px; padding: 9px 13px; font-size: .9375rem; }
 .bubble p { margin: 0; }
 .bubble-who { font-size: .75rem; color: var(--ink-faint); margin-bottom: 3px; }
@@ -311,7 +314,13 @@ body {
 }
 .banner.solo h1 { font-size: 1.375rem; }
 .lines.solo { grid-template-columns: 1fr; }
-.lines.solo .thread { max-height: none; min-height: 55vh; }
+.lines.solo .thread { min-height: 55vh; }
+
+/* Only where two columns sit side by side is a cap worth having, and even then
+   it is generous enough that a reply is visible without hunting for it. */
+@media (min-width: 861px) {
+  .lines:not(.solo) .thread { max-height: 62vh; overflow-y: auto; }
+}
 
 @media (max-width: 620px) {
   .page { padding-top: 20px; }
