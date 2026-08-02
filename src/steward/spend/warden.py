@@ -32,6 +32,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import IO, Any, Protocol
 
 from .. import config
@@ -146,8 +147,8 @@ class StdioWarden:
                 # Spawn failure, transport error, protocol mismatch: to a caller
                 # deciding whether it may spend, these are all the same answer.
                 raise WardenError(
-                    f"could not reach pay-warden via {' '.join(self.command)!r}: {exc}"
-                    f"{_stderr_tail(errlog)}"
+                    f"could not reach pay-warden via {' '.join(self.command)!r}:"
+                    f" {_because(exc)}{_stderr_tail(errlog)}"
                 ) from exc
 
     async def _call(self, tool: str, arguments: dict[str, Any], errlog: IO[str]) -> Any:
@@ -158,7 +159,7 @@ class StdioWarden:
             command=self.command[0],
             args=list(self.command[1:]),
             cwd=self.cwd,
-            env=_forwarded_env(),
+            env=_forwarded_env(self.cwd),
         )
         async with (
             stdio_client(params, errlog=errlog) as (read, write),
@@ -167,6 +168,20 @@ class StdioWarden:
             await session.initialize()
             result = await session.call_tool(tool, arguments, read_timeout_seconds=CALL_TIMEOUT)
             return _unwrap(result)
+
+
+def _because(exc: BaseException, depth: int = 0) -> str:
+    """The innermost real reason, not the wrapper.
+
+    anyio raises an ExceptionGroup when a task fails, and str() of one is
+    "unhandled errors in a TaskGroup (1 sub-exception)" — which is true and
+    says nothing. The sub-exception is where pay-warden's own message lives,
+    and that message is usually the entire fix.
+    """
+    inner = getattr(exc, "exceptions", None)
+    if inner and depth < 5:
+        return "; ".join(_because(item, depth + 1) for item in inner)
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
 def _stderr_tail(errlog: IO[str], lines: int = 8) -> str:
@@ -195,10 +210,42 @@ FORWARDED_PREFIXES = ("PAY_WARDEN_", "PRAVA_")
 _NOT_FORWARDED = frozenset({"PAY_WARDEN_COMMAND", "PAY_WARDEN_ARGS", "PAY_WARDEN_CWD"})
 
 
-def _forwarded_env() -> dict[str, str]:
+def _dotenv(directory: str | None) -> dict[str, str]:
+    """pay-warden's own .env, read from the directory it will run in.
+
+    It configures itself from os.environ and never loads a .env of its own —
+    its error message literally says "copy .env.example to .env" — so launching
+    it with a minimal environment leaves it without the Prava credentials it
+    needs to mint anything. Reading the file the operator already wrote is what
+    running it by hand would do.
+
+    Only the two namespaces are taken, so an unrelated secret sitting in that
+    file is not hoovered into a subprocess environment by accident.
+    """
+    if not directory:
+        return {}
+    path = Path(directory) / ".env"
+    if not path.exists():
+        return {}
+    found: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith(FORWARDED_PREFIXES) and key not in _NOT_FORWARDED:
+            found[key] = value.strip()
+    return found
+
+
+def _forwarded_env(cwd: str | None = None) -> dict[str, str]:
     from mcp.client.stdio import get_default_environment
 
     env = dict(get_default_environment())
+    # The file first, then the real environment — an exported variable is the
+    # more deliberate statement and should win over a file on disk.
+    env.update(_dotenv(cwd))
     env.update(
         {
             key: value

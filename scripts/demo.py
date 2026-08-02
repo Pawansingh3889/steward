@@ -208,7 +208,12 @@ def main() -> int:
     say(f"  {BOLD}Rae:{RESET} yes\n")
     handled = router.receive(Inbound(sender="+447700900001", body="yes"))
     show(handled, store)
-    say(f"\n  {GREEN}the link went to Ana, not to Rae who approved it.{RESET}")
+    if handled.kind != "approved":
+        # Printing the happy line regardless is exactly the dishonesty this
+        # project spends its time avoiding. An earlier version did.
+        say(f"  {YELLOW}the release did not happen — read the error above.{RESET}")
+        return 1
+    say(f"  {GREEN}the link went to Ana, not to Rae who approved it.{RESET}")
     return 0
 
 
