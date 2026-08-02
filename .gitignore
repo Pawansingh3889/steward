@@ -3,6 +3,9 @@
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+# What `make seed` writes beside the demo database: regenerable, and a policy
+# file in the repo would look like somebody's real limits.
+demo-household.yaml
 data/
 __pycache__/
 *.pyc

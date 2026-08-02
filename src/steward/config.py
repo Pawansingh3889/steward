@@ -19,6 +19,7 @@ DEFAULT_LINQ_BASE = "https://api.linqapp.com/api/partner/v3"
 # that is not — see the reasoning there.
 DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.2"
+DEFAULT_WEB_PORT = 8787
 
 
 class ConfigError(RuntimeError):
@@ -44,6 +45,24 @@ def _str(name: str, default: str = "") -> str:
 
 def db_path() -> str:
     return _str("STEWARD_DB") or DEFAULT_DB
+
+
+def web_port() -> int:
+    """Which port the sponsor dashboard listens on.
+
+    There is deliberately no setting for the *address*. It is 127.0.0.1, always,
+    hard-coded where the server starts. That dashboard has no authentication,
+    which is defensible only because it has no writes and no route that names a
+    household — and both of those stop being enough the moment it is reachable
+    from another machine. A STEWARD_WEB_HOST would be a foot-gun with a helpful
+    label on it.
+    """
+    raw = _str("STEWARD_WEB_PORT")
+    if not raw:
+        return DEFAULT_WEB_PORT
+    if not raw.isdigit() or not (1 <= int(raw) <= 65535):
+        raise ConfigError(f"STEWARD_WEB_PORT is {raw!r}, which is not a port number (1–65535)")
+    return int(raw)
 
 
 def openai_api_key() -> str:
