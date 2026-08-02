@@ -25,8 +25,11 @@ from .extract.base import INFERRED
 from .extract.eta import Point
 from .memory import recall
 from .models import FactKind, Role
-from .spend import purchase, warden
+from .spend import grant, purchase, warden
 from .spend.warden import WardenError
+from .surface.base import Inbound, RecordingChannel
+from .surface.linq import LinqChannel
+from .surface.router import Router
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 
@@ -329,6 +332,79 @@ def cmd_spend_preview(args: argparse.Namespace) -> int:
     return 0 if decision.allowed else 1
 
 
+def cmd_spend_grant(args: argparse.Namespace) -> int:
+    """Register a spender in the sponsor's pay-warden policy.
+
+    Without this, enrolling somebody in steward lets them do everything except
+    the one thing the product is for: pay-warden denies any agent its policy has
+    never heard of.
+    """
+    person = _resolve_person(args)
+    path = args.policy or config.pay_warden_policy()
+    if not path:
+        raise SystemExit("pass --policy, or set PAY_WARDEN_POLICY")
+    try:
+        name = grant.grant_in_file(
+            path,
+            int(person["id"]),
+            grant.Allowance(daily_budget=args.daily, max_single_purchase=args.per_purchase),
+        )
+    except grant.GrantError as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"registered {person['name']} in {path} as {name}")
+    _out(f"{DIM}daily {args.daily} · per purchase {args.per_purchase}{RESET}")
+    _out(f"{DIM}the file is the source of truth — read it, and edit it by hand any time.{RESET}")
+    return 0
+
+
+# --- messaging ---------------------------------------------------------------
+
+
+def _router(args: argparse.Namespace) -> Router:
+    channel: Any = LinqChannel() if args.channel == "linq" else RecordingChannel()
+    return Router(db_path=args.db, channel=channel)
+
+
+def cmd_text(args: argparse.Namespace) -> int:
+    """Deliver a message as if it had arrived from a phone.
+
+    The same entry point a webhook would call, which is the point: the whole
+    two-line flow can be rehearsed on one machine with no messaging provider at
+    all, and an expired sandbox never blocks the brain.
+    """
+    handled = _router(args).receive(Inbound(sender=args.sender, body=args.body))
+    if args.json:
+        _out(json.dumps(handled.as_dict(), indent=2))
+        return 0
+    if handled.kind == "unknown_sender":
+        # Reported to the operator, never to the sender. See surface/router.py.
+        _out(f"{DIM}ignored: {handled.detail}{RESET}")
+        return 1
+    for reply in handled.replies:
+        who = store.get_person(reply.outbound.person_id, db_path=args.db)
+        _out(
+            f"\n{BOLD}→ {who['name'] if who else '?'}{RESET} {DIM}({reply.to or 'no line'}){RESET}"
+        )
+        for line in reply.outbound.body.splitlines():
+            _out(f"  {line}")
+        if not reply.delivered:
+            _out(f"  {DIM}[not sent: {reply.detail}]{RESET}")
+    _out()
+    return 0
+
+
+def cmd_share(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    mode = store.SHARE_SHARED if args.on else store.SHARE_PRIVATE
+    store.set_share_mode(int(person["id"]), mode, db_path=args.db)
+    if mode == store.SHARE_SHARED:
+        _out(f"{person['name']}'s conversation is now visible to their sponsor.")
+    else:
+        _out(f"{person['name']}'s conversation is private again.")
+        _out(f"{DIM}decisions and approvals are still visible — those are not the chat.{RESET}")
+    return 0
+
+
 # --- approvals ---------------------------------------------------------------
 
 
@@ -503,6 +579,35 @@ def build_parser() -> argparse.ArgumentParser:
     previewing.add_argument("--merchant-url", required=True, dest="merchant_url")
     previewing.add_argument("--merchant-country", default="GB", dest="merchant_country")
     previewing.set_defaults(func=cmd_spend_preview)
+
+    granting = spending_sub.add_parser(
+        "grant", help="register a spender in the sponsor's pay-warden policy"
+    )
+    _add_person_flags(granting)
+    granting.add_argument("--policy", default="", help="path; defaults to $PAY_WARDEN_POLICY")
+    granting.add_argument("--daily", required=True, help='daily budget, e.g. "50.00"')
+    granting.add_argument(
+        "--per-purchase", required=True, dest="per_purchase", help="cap per purchase"
+    )
+    granting.set_defaults(func=cmd_spend_grant)
+
+    texting = sub.add_parser("text", help="deliver a message as if it arrived from a phone")
+    texting.add_argument("sender", help="the number it came from")
+    texting.add_argument("body")
+    texting.add_argument(
+        "--channel",
+        default="recording",
+        choices=("recording", "linq"),
+        help="where replies go; linq is dry-run unless STEWARD_LINQ_LIVE=1",
+    )
+    texting.set_defaults(func=cmd_text)
+
+    sharing = sub.add_parser("share", help="who can see a spender's conversation")
+    _add_person_flags(sharing)
+    mode = sharing.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--on", action="store_true", help="let the sponsor see it")
+    mode.add_argument("--off", action="store_true", help="make it private again")
+    sharing.set_defaults(func=cmd_share)
 
     approvals = sub.add_parser("approvals", help="purchases waiting on a sponsor")
     approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)

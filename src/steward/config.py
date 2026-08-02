@@ -94,6 +94,18 @@ def linq_from_number() -> str:
     return _str("LINQ_FROM_NUMBER")
 
 
+def linq_live() -> bool:
+    """Whether messages actually go to real phones.
+
+    Off unless explicitly turned on. A text reaches a real person, cannot be
+    recalled, and may cost money; an integration that went live merely because
+    a token happened to be present is how a test run becomes a message to
+    somebody's parent. Same strictness about what counts as yes as
+    `local_llm_allow_remote` — "false" must not read as true.
+    """
+    return _str("STEWARD_LINQ_LIVE").lower() in ("1", "true", "yes", "on")
+
+
 def pay_warden_command() -> list[str]:
     """How to launch pay-warden as an MCP subprocess.
 
@@ -108,6 +120,12 @@ def pay_warden_command() -> list[str]:
             " there is no path to spending without it (see .env.example)"
         )
     return [command, *_str("PAY_WARDEN_ARGS").split()]
+
+
+def pay_warden_policy() -> str:
+    """Where the sponsor's policy lives. Read here so `steward spend grant` and
+    the pay-warden subprocess are always talking about the same file."""
+    return _str("PAY_WARDEN_POLICY")
 
 
 def pay_warden_cwd() -> str | None:

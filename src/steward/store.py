@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS people (
   -- "delivery time unknown" rather than guessing.
   home_lat REAL,
   home_lon REAL,
+  -- Whether this person's conversation is currently visible to their sponsor.
+  -- Theirs to set and theirs to change; 'private' is the default because a
+  -- default that leaks is not a default anyone chose.
+  share_mode TEXT NOT NULL DEFAULT 'private',
   created_ts TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS facts (
@@ -163,6 +167,11 @@ _initialized: set[str] = set()
 _init_lock = threading.Lock()
 
 
+SHARE_PRIVATE = "private"
+SHARE_SHARED = "shared"
+SHARE_MODES = (SHARE_PRIVATE, SHARE_SHARED)
+
+
 class StoreError(RuntimeError):
     """A write did not land on the row it was aimed at."""
 
@@ -188,6 +197,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("facts", "confirmed_ts", "TEXT NOT NULL DEFAULT ''"),
     ("people", "home_lat", "REAL"),
     ("people", "home_lon", "REAL"),
+    ("people", "share_mode", "TEXT NOT NULL DEFAULT 'private'"),
 )
 
 # Indexes this version replaced. Dropped by name before the new ones are
@@ -308,6 +318,21 @@ def set_home_location(
             "UPDATE people SET home_lat = ?, home_lon = ? WHERE id = ?",
             (latitude, longitude, person_id),
         )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no person {person_id}")
+
+
+def set_share_mode(person_id: int, mode: str, db_path: str | None = None) -> None:
+    """Set whether this person's conversation is visible to their sponsor.
+
+    Only ever called on the spender's own instruction. There is no tool for it:
+    an agent that could open someone's conversation to their sponsor would make
+    the setting decorative.
+    """
+    if mode not in SHARE_MODES:
+        raise StoreError(f"unknown share mode {mode!r}; use one of: {', '.join(SHARE_MODES)}")
+    with transaction(db_path) as conn:
+        cur = conn.execute("UPDATE people SET share_mode = ? WHERE id = ?", (mode, person_id))
         if cur.rowcount == 0:
             raise NotFoundError(f"no person {person_id}")
 

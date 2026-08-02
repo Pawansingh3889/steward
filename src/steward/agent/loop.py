@@ -112,9 +112,19 @@ def run(
     # this is their machine and their words, and a memory that reads back
     # [redacted] protects nothing from anyone who can already open the file.
     turn_id = None
+    # Whether this turn is visible to the sponsor is the spender's standing
+    # choice, read at the moment the turn is written. Deciding it later, at read
+    # time, would retroactively expose everything said before they turned
+    # sharing on — which is not what anyone means by "share this conversation".
+    person = store.get_person(person_id, db_path=db_path)
+    shared = bool(person and person["share_mode"] == store.SHARE_SHARED)
     if record:
         turn_id = store.insert_turn(
-            person_id=person_id, speaker=Speaker.PERSON, text=question, db_path=db_path
+            person_id=person_id,
+            speaker=Speaker.PERSON,
+            text=question,
+            shared_with_sponsor=shared,
+            db_path=db_path,
         )
         episodic.remember(person_id=person_id, text=question, turn_id=turn_id, db_path=db_path)
     run_id = store.insert_agent_run(
@@ -180,7 +190,11 @@ def run(
     # own guesses as though the person had said them.
     if record:
         store.insert_turn(
-            person_id=person_id, speaker=Speaker.STEWARD, text=safe_answer, db_path=db_path
+            person_id=person_id,
+            speaker=Speaker.STEWARD,
+            text=safe_answer,
+            shared_with_sponsor=shared,
+            db_path=db_path,
         )
     return {
         "run_id": run_id,

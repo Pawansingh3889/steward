@@ -15,8 +15,28 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 4 of 8. "I'm out of soap" → options with price and delivery → the person
-chooses → policy decides → settled.
+Phase 5 of 8. Two humans transact by text.
+
+```
+Ana texts her line  +447700900002
+    I'm out of soap, can I get some?
+
+  → Ana Whitfield
+    Asked Rae about that one — I'll let you know.
+
+  → Rae Whitfield                                    (her own line)
+    Ana Whitfield wants hand soap, 2 x 500ml — £25.00 GBP from Everyday Goods.
+    Policy: 25 GBP exceeds auto-approval threshold 20.00 GBP; a human must release it
+    Reply YES or NO (#1).
+
+Rae replies  +447700900001
+    yes
+
+  → Rae Whitfield        Approved — hand soap, 2 x 500ml.
+  → Ana Whitfield        …is approved. Finish it here: https://sandbox.collect…
+```
+
+Rae never sees the conversation — only what she was asked to decide.
 
 ```
 $ steward shop soap
@@ -167,6 +187,56 @@ honest form of a real finding: canibuy graded the open web for agent-readiness
 and the best merchant scored **C**, most scored **F**, and none sell household
 essentials. Phase 7 swaps live fetching in for any merchant that grades well.
 
+## Two lines, and what crosses between them
+
+The spender texts about what they need. The sponsor's line carries approvals
+and policy and **nothing else** — that separation is the product, because it is
+what lets a sponsor stay out of the day-to-day without losing the say they care
+about. The approval link goes to the spender, not the sponsor: they said yes,
+but it is still the spender's errand and their passkey.
+
+Three routing rules are security properties, not conveniences:
+
+- **An unknown number gets silence.** Not an error, not "who is this?" — any
+  reply confirms to a stranger that this number moves money.
+- **A sponsor can only decide their own household's escalations**, so a number
+  cannot approve someone else's spending by guessing an id.
+- **A bare "yes" with two things pending asks which.** Guessing would be
+  guessing with somebody's money. And only the *first* word of a reply counts:
+  scanning for a yes-word anywhere would approve a purchase on the strength of
+  "fine" in the middle of a sentence.
+
+Nothing is shared by default. The spender says "share this" or "keep this
+private", and it applies to what is said from then on — turning sharing on does
+not retroactively expose what came before, which is not what anyone means by
+sharing a conversation. There is no tool for it: an agent that could open
+someone's conversation to their sponsor would make the setting decorative.
+
+Messaging is an adapter. `RecordingChannel` is a first-class implementation, so
+the whole two-line flow rehearses on one machine with no provider at all — which
+is what keeps Linq's sandbox (expiring 9 August 2026) from being able to stop
+anyone managing their money. **The Linq adapter is dry-run unless
+`STEWARD_LINQ_LIVE=1`.** A text reaches a real person and cannot be recalled; an
+integration that went live merely because a token was present is how a test run
+becomes a message to somebody's parent.
+
+## Letting someone spend
+
+Enrolling a person is not enough — pay-warden denies any agent its policy has
+never heard of. `steward spend grant` registers them:
+
+```
+$ steward spend grant --person 2 --daily 50.00 --per-purchase 30.00
+registered Ana Whitfield in household.yaml as steward:person_2
+the file is the source of truth — read it, and edit it by hand any time.
+```
+
+It edits the YAML in place with the stdlib, preserving comments and ordering —
+`yaml.safe_dump` would strip every note the sponsor wrote, which for a policy
+file is most of its value. It invents no limits (a default budget chosen by a
+program is a decision about someone's money that nobody made) and refuses to
+re-grant rather than overwriting limits that may have been hand-edited since.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -208,6 +278,11 @@ src/steward/
   spend/
     warden.py      the MCP client to pay-warden; the only path to money
     purchase.py    blocked / escalated / approved / paid
+    grant.py       registering a spender in the sponsor's policy
+  surface/
+    base.py        channels, and reading a one-thumb reply
+    router.py      who sent this, and what happens next
+    linq.py        real phones, dry-run unless told otherwise
   agent/
     llm.py         the one place this system talks to OpenAI
     privacy.py     pseudonyms + denylist, rebuilt per run
