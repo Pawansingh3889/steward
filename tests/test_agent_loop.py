@@ -52,6 +52,10 @@ def test_every_tool_is_described(box: ToolBox) -> None:
         "request_purchase",
         "find_options",
         "buy_offer",
+        "propose_plan",
+        "adjust_plan",
+        "add_plan_item",
+        "show_plans",
     }
     assert all(spec["function"]["description"] for spec in specs)
 

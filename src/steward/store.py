@@ -123,6 +123,40 @@ CREATE TABLE IF NOT EXISTS escalations (
   created_ts TEXT NOT NULL,
   decided_ts TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS plans (
+  id INTEGER PRIMARY KEY,
+  person_id INTEGER NOT NULL REFERENCES people(id),
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'goal',
+  target_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'GBP',
+  cadence TEXT NOT NULL DEFAULT 'monthly',
+  per_period_cents INTEGER NOT NULL DEFAULT 0,
+  start_date TEXT NOT NULL,
+  finish_date TEXT NOT NULL,
+  -- draft until a person activates it. A draft is arithmetic; an active plan is
+  -- something steward will talk about and warn against spending into, which is
+  -- why only a person can make one.
+  status TEXT NOT NULL DEFAULT 'draft',
+  -- What has actually been put aside, as the person has told us. steward has no
+  -- bank access and cannot move money, so this is the only kind of progress it
+  -- can honestly report — never a figure it inferred from the calendar.
+  contributed_cents INTEGER NOT NULL DEFAULT 0,
+  created_ts TEXT NOT NULL,
+  activated_ts TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS plan_items (
+  id INTEGER PRIMARY KEY,
+  plan_id INTEGER NOT NULL REFERENCES plans(id),
+  description TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'other',
+  -- Flights and accommodation always need a person, whatever policy would say.
+  -- Set in plan/goals.py rather than by a caller, so the model cannot clear it.
+  needs_human INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'planned',
+  created_ts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY,
   person_id INTEGER NOT NULL DEFAULT 0,
@@ -161,6 +195,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_ts ON agent_runs(ts);
 CREATE INDEX IF NOT EXISTS idx_people_phone ON people(phone);
 CREATE INDEX IF NOT EXISTS idx_escalations_sponsor ON escalations(sponsor_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_attempt ON escalations(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_plans_person ON plans(person_id, status);
+CREATE INDEX IF NOT EXISTS idx_plan_items_plan ON plan_items(plan_id);
 """
 
 _initialized: set[str] = set()
@@ -683,6 +719,186 @@ def set_escalation_payment_url(
         )
         if cur.rowcount == 0:
             raise NotFoundError(f"no escalation {escalation_id}")
+
+
+# --- plans ---------------------------------------------------------------------
+
+# Item kinds nobody buys unattended. Kept here, beside the SQL that writes the
+# flag, so `needs_human` is computed at the point of insert and no caller —
+# tool, CLI or future executor — can pass it in as False.
+PLAN_ITEM_ALWAYS_HUMAN = frozenset({"flight", "accommodation"})
+
+PLAN_DRAFT = "draft"
+PLAN_ACTIVE = "active"
+PLAN_DONE = "done"
+PLAN_ABANDONED = "abandoned"
+PLAN_STATUSES = (PLAN_DRAFT, PLAN_ACTIVE, PLAN_DONE, PLAN_ABANDONED)
+
+
+def insert_plan(
+    *,
+    person_id: int,
+    name: str,
+    kind: str,
+    target_cents: int,
+    currency: str,
+    cadence: str,
+    per_period_cents: int,
+    start_date: str,
+    finish_date: str,
+    db_path: str | None = None,
+) -> int:
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO plans (person_id, name, kind, target_cents, currency, cadence,"
+            " per_period_cents, start_date, finish_date, created_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                person_id,
+                name,
+                kind,
+                target_cents,
+                currency,
+                cadence,
+                per_period_cents,
+                start_date,
+                finish_date,
+                utc_now_iso(),
+            ),
+        )
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+
+def get_plan(plan_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    with transaction(db_path) as conn:
+        return _row(conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)))
+
+
+def list_plans(
+    person_id: int, *, status: str = "", db_path: str | None = None
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM plans WHERE person_id = ?"
+    params: list[Any] = [person_id]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY id DESC"
+    with transaction(db_path) as conn:
+        return _rows(conn.execute(sql, tuple(params)))
+
+
+def update_plan_schedule(
+    plan_id: int,
+    *,
+    person_id: int,
+    target_cents: int,
+    per_period_cents: int,
+    cadence: str,
+    finish_date: str,
+    db_path: str | None = None,
+) -> None:
+    """Reshape a plan. Only a draft, and only the owner's.
+
+    Both conditions live in the WHERE clause rather than in a caller's `if`.
+    Draft-only, because changing the numbers under a plan somebody activated
+    makes the thing they agreed to and the thing steward tracks two different
+    plans. Owner-only, because `plan_id` is a handle the model can guess, and a
+    scope check that lives above this line is a scope check that can be
+    forgotten by the next caller.
+    """
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE plans SET target_cents = ?, per_period_cents = ?, cadence = ?,"
+            " finish_date = ? WHERE id = ? AND person_id = ? AND status = 'draft'",
+            (target_cents, per_period_cents, cadence, finish_date, plan_id, person_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no draft plan {plan_id} of yours to reshape")
+
+
+def set_plan_status(
+    plan_id: int, *, person_id: int, status: str, expect: str, db_path: str | None = None
+) -> None:
+    """Move a plan between statuses, exactly once, and only the owner's.
+
+    `expect` in the WHERE clause is the same guard `decide_escalation` uses: two
+    activations of one plan, or an activation racing an abandonment, must not
+    both succeed. `person_id` is there for the same reason it is in
+    `update_plan_schedule` — a plan id is guessable.
+    """
+    if status not in PLAN_STATUSES:
+        raise StoreError(f"unknown plan status {status!r}")
+    activated = utc_now_iso() if status == PLAN_ACTIVE else ""
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE plans SET status = ?, activated_ts = CASE WHEN ? = '' THEN activated_ts"
+            " ELSE ? END WHERE id = ? AND person_id = ? AND status = ?",
+            (status, activated, activated, plan_id, person_id, expect),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no plan {plan_id} of yours in status {expect!r}")
+
+
+def add_contribution(
+    plan_id: int, amount_cents: int, *, person_id: int, db_path: str | None = None
+) -> None:
+    """Record what the person says they have put aside."""
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE plans SET contributed_cents = contributed_cents + ?"
+            " WHERE id = ? AND person_id = ?",
+            (amount_cents, plan_id, person_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no plan {plan_id} of yours")
+
+
+def insert_plan_item(
+    *,
+    plan_id: int,
+    description: str,
+    amount_cents: int,
+    kind: str,
+    db_path: str | None = None,
+) -> int:
+    """Add something a plan has to pay for.
+
+    `needs_human` is **computed here from the kind** and is not a parameter. A
+    flight or a hotel is confirmed by a person however small it is and whatever
+    policy would allow; making it an argument would make it negotiable by
+    whoever calls next.
+
+    The parent is looked up rather than left to the foreign key. `PRAGMA
+    foreign_keys=ON` would raise sqlite3.IntegrityError, which is not a
+    StoreError and would escape the agent's dispatch, the loop and the router
+    uncaught — a guessed plan id would crash a conversation instead of being
+    answered.
+    """
+    with transaction(db_path) as conn:
+        if _row(conn.execute("SELECT id FROM plans WHERE id = ?", (plan_id,))) is None:
+            raise NotFoundError(f"no plan {plan_id}")
+        cur = conn.execute(
+            "INSERT INTO plan_items (plan_id, description, amount_cents, kind, needs_human,"
+            " created_ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                plan_id,
+                description,
+                amount_cents,
+                kind,
+                int(kind in PLAN_ITEM_ALWAYS_HUMAN),
+                utc_now_iso(),
+            ),
+        )
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+
+def list_plan_items(plan_id: int, db_path: str | None = None) -> list[dict[str, Any]]:
+    with transaction(db_path) as conn:
+        return _rows(
+            conn.execute("SELECT * FROM plan_items WHERE plan_id = ? ORDER BY id", (plan_id,))
+        )
 
 
 # --- agent audit -------------------------------------------------------------

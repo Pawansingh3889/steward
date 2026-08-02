@@ -14,6 +14,7 @@ by forgetting to.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from .. import store
@@ -21,6 +22,8 @@ from ..catalogue import search
 from ..extract.eta import Point
 from ..memory import recall
 from ..models import FactKind
+from ..plan import goals
+from ..plan.schedule import PlanError
 from ..spend import purchase
 from ..spend.warden import Warden, WardenError
 from .privacy import Redactor
@@ -135,6 +138,65 @@ SPECS: list[dict[str, Any]] = [
         },
     ),
     _spec(
+        "propose_plan",
+        "Work out a savings plan and keep it as a draft. Give the target and"
+        " EITHER a date to reach it by OR an amount to put aside each time —"
+        " whichever you leave out is what this works out. If it does not reach,"
+        " say so plainly and read out all three ways to close the gap without"
+        " picking one. A draft does nothing until the person starts it"
+        " themselves; tell them to say 'start that plan'.",
+        {
+            "name": {"type": "string", "description": "what they are saving for"},
+            "target_cents": {"type": "integer", "description": "integer minor units"},
+            "finish": {"type": "string", "description": "YYYY-MM-DD, or omit to solve for it"},
+            "per_period_cents": {
+                "type": "integer",
+                "description": "put aside each period, or omit to solve for it",
+            },
+            "cadence": {"type": "string", "description": "weekly, fortnightly or monthly"},
+            "kind": {"type": "string", "description": "goal or trip"},
+            "already_saved_cents": {
+                "type": "integer",
+                "description": "what they say they have put aside already",
+            },
+            "affordable_cents": {
+                "type": "integer",
+                "description": "what they say they can spare each period, if they said",
+            },
+        },
+    ),
+    _spec(
+        "adjust_plan",
+        "Change one number on a draft and see what it does to the others. Set at"
+        " most two of target, date and amount — the third is what this works out."
+        " Only drafts can be reshaped.",
+        {
+            "plan_id": {"type": "integer"},
+            "target_cents": {"type": "integer"},
+            "finish": {"type": "string", "description": "YYYY-MM-DD"},
+            "per_period_cents": {"type": "integer"},
+            "cadence": {"type": "string"},
+        },
+    ),
+    _spec(
+        "add_plan_item",
+        "Add something a trip has to pay for. Flights and accommodation always"
+        " need a person to confirm them — steward never books those, whatever"
+        " the policy would allow, so say so rather than implying you will.",
+        {
+            "plan_id": {"type": "integer"},
+            "description": {"type": "string"},
+            "amount_cents": {"type": "integer"},
+            "kind": {"type": "string", "description": "flight, accommodation or other"},
+        },
+    ),
+    _spec(
+        "show_plans",
+        "The person's plans, drafts and active. Use it when they ask how a goal"
+        " is going, or refer to a plan you have not seen this conversation.",
+        {"limit": {"type": "integer", "description": "how many, default 10"}},
+    ),
+    _spec(
         "search_memory",
         "Search things the person has said in the past, by resemblance. Use it"
         " for context and colour — 'you mentioned this before'. Do NOT use it as"
@@ -147,6 +209,18 @@ SPECS: list[dict[str, Any]] = [
         },
     ),
 ]
+
+
+def _date_or_none(value: str) -> date | None:
+    """A date the model wrote, or nothing. Malformed input becomes None rather
+    than an exception, so `solve` reports what it actually needs instead of the
+    loop dying on a typo."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
 
 
 def _clamp(limit: Any, default: int, ceiling: int = 100) -> int:
@@ -336,7 +410,87 @@ class ToolBox:
                 "amount_cents": amount_cents,
             }
         )
+        # Attached to every purchase result rather than left to a separate tool
+        # the model might not call. Advisory: it changes nothing about whether
+        # the purchase happens, and says so in its own text.
+        dents = goals.impact(self.person_id, int(amount_cents), db_path=self.db_path)
+        if dents:
+            outcome["goal_impact"] = dents
         return outcome
+
+    # --- plans ---------------------------------------------------------------
+    #
+    # Note what is absent, as with purchases: nothing here activates or abandons
+    # a plan. A draft is arithmetic and safe for a model to produce; an active
+    # plan is a commitment steward will talk about and count against, so only a
+    # person starts one. `start` is absent too — see plan/goals.py.
+
+    def _tool_propose_plan(
+        self,
+        name: str = "",
+        target_cents: int = 0,
+        finish: str = "",
+        per_period_cents: int = 0,
+        cadence: str = "monthly",
+        kind: str = "goal",
+        already_saved_cents: int = 0,
+        affordable_cents: int = 0,
+    ) -> dict[str, Any]:
+        try:
+            return goals.propose(
+                person_id=self.person_id,
+                name=name,
+                target_cents=int(target_cents),
+                finish=_date_or_none(finish),
+                per_period_cents=int(per_period_cents) or None,
+                cadence=cadence,
+                kind=kind,
+                already_saved_cents=max(0, int(already_saved_cents)),
+                affordable_cents=max(0, int(affordable_cents)),
+                db_path=self.db_path,
+            )
+        except PlanError as exc:
+            return {"error": str(exc)}
+
+    def _tool_adjust_plan(
+        self,
+        plan_id: int = 0,
+        target_cents: int = 0,
+        finish: str = "",
+        per_period_cents: int = 0,
+        cadence: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return goals.adjust(
+                int(plan_id),
+                person_id=self.person_id,
+                target_cents=int(target_cents) or None,
+                finish=_date_or_none(finish),
+                per_period_cents=int(per_period_cents) or None,
+                cadence=cadence or None,
+                db_path=self.db_path,
+            )
+        except PlanError as exc:
+            return {"error": str(exc)}
+
+    def _tool_add_plan_item(
+        self, plan_id: int = 0, description: str = "", amount_cents: int = 0, kind: str = "other"
+    ) -> dict[str, Any]:
+        try:
+            return goals.add_item(
+                int(plan_id),
+                person_id=self.person_id,
+                description=description,
+                amount_cents=int(amount_cents),
+                kind=kind,
+                db_path=self.db_path,
+            )
+        except (PlanError, store.NotFoundError) as exc:
+            return {"error": str(exc)}
+
+    def _tool_show_plans(self, limit: int = 10) -> dict[str, Any]:
+        plans = goals.everything(self.person_id, db_path=self.db_path)
+        return {"plans": plans[: _clamp(limit, 10, ceiling=25)], "count": len(plans)}
 
     def _tool_forget_fact(self, fact_id: int = 0) -> dict[str, Any]:
         row = store.get_fact(int(fact_id), db_path=self.db_path)

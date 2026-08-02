@@ -31,7 +31,9 @@ import httpx
 
 from .. import store
 from ..agent import llm, loop
-from ..models import Role, Trigger
+from ..models import Role, Trigger, money
+from ..plan import goals, schedule
+from ..plan.schedule import PlanError
 from ..spend import purchase
 from ..spend.warden import Warden, WardenError
 from .base import OTHER, YES, Channel, Delivery, Inbound, Outbound, RecordingChannel, intent
@@ -41,6 +43,11 @@ from .base import OTHER, YES, Channel, Delivery, Inbound, Outbound, RecordingCha
 # by the word "private" appearing in a sentence about something else.
 SHARE_ON = ("share this", "share this chat", "let them see this", "share with my sponsor")
 SHARE_OFF = ("keep this private", "make this private", "stop sharing", "private again")
+
+# Starting a plan, matched as whole phrases for the same reason. Nothing as
+# loose as "let's do it": this branch commits a person to a schedule, and a
+# phrase that could mean anything must not be the thing that starts one.
+START_PLAN = ("start that plan", "start the plan", "start my plan", "start saving")
 
 
 @dataclass
@@ -103,6 +110,12 @@ class Router:
             return self._set_sharing(person, store.SHARE_SHARED)
         if any(phrase in lowered for phrase in SHARE_OFF):
             return self._set_sharing(person, store.SHARE_PRIVATE)
+        # Before the fall-through, and not negotiable. There is no tool that
+        # activates a plan, so a "start that plan" that reached the model would
+        # get a cheerful "started it" and nothing would have happened — a false
+        # confirmation of a commitment, which is worse than an unhandled phrase.
+        if any(phrase in lowered for phrase in START_PLAN):
+            return self._start_plan(person, body)
 
         try:
             result = loop.run(
@@ -143,6 +156,74 @@ class Router:
             )
         return Handled(person_id, "sharing", [self.send(person_id, body, about="sharing")])
 
+    def _start_plan(self, person: dict[str, Any], body: str) -> Handled:
+        """Activate a draft, the way a sponsor's YES releases an escalation.
+
+        Same five branches as `_sponsor_said`, for the same reasons: a scoped
+        candidate set, an id only matched against it, silence-free handling of
+        "none", and a question rather than a guess when there is more than one.
+        """
+        person_id = int(person["id"])
+        candidates = goals.drafts(person_id, db_path=self.db_path)
+        if not candidates:
+            # Never fall through to the model here — see the call site.
+            running = store.list_plans(person_id, status=store.PLAN_ACTIVE, db_path=self.db_path)
+            body_text = (
+                f"{running[0]['name']} is already running."
+                if len(running) == 1
+                else "There's no draft plan waiting to start. Tell me what you're saving for."
+            )
+            return Handled(person_id, "no_draft", [self.send(person_id, body_text, about="plan")])
+
+        chosen = _referenced(body, candidates)
+        if chosen is None:
+            if len(candidates) > 1:
+                lines = "\n".join(
+                    f"  #{row['id']}  {row['name']} — "
+                    f"{money(int(row['per_period_cents']), str(row['currency']))} a "
+                    f"{schedule.noun(str(row['cadence']))}"
+                    for row in candidates
+                )
+                return Handled(
+                    person_id,
+                    "ambiguous_plan",
+                    [
+                        self.send(
+                            person_id,
+                            f"You have more than one draft — which?\n{lines}\n"
+                            f"Reply e.g. 'start that plan #{candidates[0]['id']}'.",
+                            about="plan",
+                        )
+                    ],
+                )
+            chosen = candidates[0]
+
+        try:
+            started = goals.activate(int(chosen["id"]), person_id=person_id, db_path=self.db_path)
+        except (PlanError, store.NotFoundError) as exc:
+            return Handled(
+                person_id,
+                "plan_failed",
+                [self.send(person_id, f"I couldn't start that: {exc}", about="plan")],
+                str(exc),
+            )
+        amount = money(int(chosen["per_period_cents"]), str(chosen["currency"]))
+        return Handled(
+            person_id,
+            "plan_started",
+            [
+                self.send(
+                    person_id,
+                    f"Started {started['name']} — {amount} a "
+                    f"{schedule.noun(str(chosen['cadence']))} until "
+                    f"{chosen['finish_date']}.\nI'll say when something would set it back."
+                    " I won't stop you spending; that's not mine to do.",
+                    about="plan",
+                )
+            ],
+            detail=str(chosen["id"]),
+        )
+
     def _notify_sponsor(self, person: dict[str, Any], result: dict[str, Any]) -> list[Delivery]:
         """Text the sponsor about anything parked during this run."""
         sent: list[Delivery] = []
@@ -164,11 +245,9 @@ class Router:
         return sent
 
     def _escalation_text(self, person: dict[str, Any], escalation: dict[str, Any]) -> str:
-        amount = int(escalation["amount_cents"]) / 100
-        symbol = {"GBP": "£", "USD": "$", "EUR": "€"}.get(str(escalation["currency"]), "")
         return (
             f"{person['name']} wants {escalation['description']}"
-            f" — {symbol}{amount:,.2f} {escalation['currency']}"
+            f" — {money(int(escalation['amount_cents']), str(escalation['currency']))}"
             f" from {escalation['merchant_name']}.\n"
             # The rule that fired, worded as the policy engine worded it. The
             # sponsor is being asked because their own policy said to ask them.
@@ -270,9 +349,8 @@ class Router:
         )
 
     def _one_line(self, row: dict[str, Any]) -> str:
-        amount = int(row["amount_cents"]) / 100
-        symbol = {"GBP": "£", "USD": "$", "EUR": "€"}.get(str(row["currency"]), "")
-        return f"  #{row['id']}  {row['description']} — {symbol}{amount:,.2f}"
+        amount = money(int(row["amount_cents"]), str(row["currency"]))
+        return f"  #{row['id']}  {row['description']} — {amount}"
 
 
 def _referenced(body: str, waiting: list[dict[str, Any]]) -> dict[str, Any] | None:

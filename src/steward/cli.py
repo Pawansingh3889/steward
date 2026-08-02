@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,9 @@ from .extract import pipeline
 from .extract.base import INFERRED
 from .extract.eta import Point
 from .memory import recall
-from .models import FactKind, Role
+from .models import FactKind, Role, money
+from .plan import goals, schedule
+from .plan.schedule import PlanError
 from .spend import grant, purchase, warden
 from .spend.warden import WardenError
 from .surface.base import Inbound, RecordingChannel
@@ -405,12 +408,177 @@ def cmd_share(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- plans ---------------------------------------------------------------------
+
+
+def _show_plan(plan: dict[str, Any]) -> None:
+    def money_of(cents: int) -> str:
+        return _money(cents, plan["currency"])
+
+    flag = (
+        ""
+        if plan["reaches_target"]
+        else f"  {BOLD}short {money_of(plan['shortfall_cents'])}{RESET}"
+    )
+    _out(f"  {plan['plan_id']:>4}  {BOLD}{plan['name']}{RESET}  [{plan['status']}]{flag}")
+    _out(
+        f"        {money_of(plan['per_period_cents'])} a {schedule.noun(plan['cadence'])}"
+        f" × {plan['periods']} → {money_of(plan['saved_cents'])} of"
+        f" {money_of(plan['target_cents'])} by {plan['finish']}"
+    )
+    if plan["contributed_cents"]:
+        _out(f"        {DIM}put aside so far: {money_of(plan['contributed_cents'])}{RESET}")
+    for item in plan["items"]:
+        needs = "  ← you book this" if item["needs_human"] else ""
+        _out(f"        · {item['description']}  {money_of(item['amount_cents'])}{needs}")
+    if plan["items"] and not plan["items_covered"]:
+        _out(
+            f"        {DIM}items add up to {money_of(plan['items_total_cents'])},"
+            f" more than the target{RESET}"
+        )
+
+
+def cmd_plan_list(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    plans = goals.everything(int(person["id"]), db_path=args.db)
+    if args.json:
+        _out(json.dumps(plans, indent=2))
+        return 0
+    if not plans:
+        _out("no plans yet.")
+        return 0
+    _out(f"\n{BOLD}{person['name']}'s plans{RESET}\n")
+    for plan in plans:
+        _show_plan(plan)
+    _out(f"\n{DIM}start one:  steward plan activate --id N{RESET}\n")
+    return 0
+
+
+def cmd_plan_propose(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        plan = goals.propose(
+            person_id=int(person["id"]),
+            name=args.name,
+            target_cents=args.target_cents,
+            finish=date.fromisoformat(args.finish) if args.finish else None,
+            per_period_cents=args.per_period_cents or None,
+            cadence=args.cadence,
+            kind=args.kind,
+            already_saved_cents=args.already_saved,
+            affordable_cents=args.affordable,
+            db_path=args.db,
+        )
+    except (PlanError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _out(json.dumps(plan, indent=2))
+        return 0
+    _out()
+    _show_plan(plan)
+    _ways(plan)
+    _out(
+        f"\n{DIM}it does nothing until you start it:  steward plan activate --id"
+        f" {plan['plan_id']}{RESET}\n"
+    )
+    return 0
+
+
+def _ways(plan: dict[str, Any]) -> None:
+    if not plan.get("ways_to_close"):
+        return
+    _out(f"\n  {BOLD}three ways to close the gap{RESET}  {DIM}(your call, not mine){RESET}")
+    for option in plan["ways_to_close"]:
+        _out(
+            f"        {option['change']:<16}"
+            f" {_money(option['target_cents'], option['currency'])} at"
+            f" {_money(option['per_period_cents'], option['currency'])} by {option['finish']}"
+        )
+        _out(f"        {'':<16} {DIM}{option['note']}{RESET}")
+
+
+def cmd_plan_adjust(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        plan = goals.adjust(
+            args.id,
+            person_id=int(person["id"]),
+            target_cents=args.target_cents or None,
+            finish=date.fromisoformat(args.finish) if args.finish else None,
+            per_period_cents=args.per_period_cents or None,
+            cadence=args.cadence or None,
+            db_path=args.db,
+        )
+    except (PlanError, store.NotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out()
+    _show_plan(plan)
+    _ways(plan)
+    _out()
+    return 0
+
+
+def cmd_plan_item(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        item = goals.add_item(
+            args.id,
+            person_id=int(person["id"]),
+            description=args.description,
+            amount_cents=args.amount_cents,
+            kind=args.kind,
+            db_path=args.db,
+        )
+    except (PlanError, store.NotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"added: {args.description}")
+    if item["needs_human"]:
+        what = "flights" if args.kind == goals.FLIGHT else "places to stay"
+        _out(f"{DIM}you book this one yourself — steward never books {what}.{RESET}")
+    return 0
+
+
+def cmd_plan_activate(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        started = goals.activate(args.id, person_id=int(person["id"]), db_path=args.db)
+    except (PlanError, store.NotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"started: {started['name']}")
+    _out(f"{DIM}steward will say when something would set it back. It will not stop you.{RESET}")
+    return 0
+
+
+def cmd_plan_abandon(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        stopped = goals.abandon(args.id, person_id=int(person["id"]), db_path=args.db)
+    except (PlanError, store.NotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out(f"stopped: {stopped['name']}")
+    return 0
+
+
+def cmd_plan_contribute(args: argparse.Namespace) -> int:
+    person = _resolve_person(args)
+    try:
+        plan = goals.contribute(
+            args.id, args.amount_cents, person_id=int(person["id"]), db_path=args.db
+        )
+    except (PlanError, store.NotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    _out()
+    _show_plan(plan)
+    _out()
+    return 0
+
+
 # --- approvals ---------------------------------------------------------------
 
 
-def _money(amount_cents: int, currency: str) -> str:
-    symbol = {"GBP": "£", "USD": "$", "EUR": "€"}.get(currency, "")
-    return f"{symbol}{amount_cents / 100:,.2f} {currency}".strip()
+# Kept as a name because the CLI reads better with it; the format itself lives
+# in models so every surface renders money the same way.
+_money = money
 
 
 def cmd_approvals_list(args: argparse.Namespace) -> int:
@@ -608,6 +776,64 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--on", action="store_true", help="let the sponsor see it")
     mode.add_argument("--off", action="store_true", help="make it private again")
     sharing.set_defaults(func=cmd_share)
+
+    planning = sub.add_parser("plan", help="saving up for something")
+    planning_sub = planning.add_subparsers(dest="plan_command", required=True)
+
+    plan_list = planning_sub.add_parser("list", help="plans and drafts")
+    _add_person_flags(plan_list)
+    plan_list.set_defaults(func=cmd_plan_list)
+
+    plan_new = planning_sub.add_parser("propose", help="work out a schedule; saves a draft")
+    _add_person_flags(plan_new)
+    plan_new.add_argument("--name", required=True)
+    plan_new.add_argument("--target-cents", type=int, required=True, dest="target_cents")
+    plan_new.add_argument("--finish", default="", help="YYYY-MM-DD, or omit to solve for it")
+    plan_new.add_argument(
+        "--per-period-cents",
+        type=int,
+        default=0,
+        dest="per_period_cents",
+        help="or omit to solve for it",
+    )
+    plan_new.add_argument("--cadence", default="monthly")
+    plan_new.add_argument("--kind", default="goal", choices=("goal", "trip"))
+    plan_new.add_argument("--already-saved", type=int, default=0, dest="already_saved")
+    plan_new.add_argument("--affordable", type=int, default=0, help="what you can spare each time")
+    plan_new.set_defaults(func=cmd_plan_propose)
+
+    plan_adj = planning_sub.add_parser("adjust", help="change one number on a draft")
+    _add_person_flags(plan_adj)
+    plan_adj.add_argument("--id", type=int, required=True)
+    plan_adj.add_argument("--target-cents", type=int, default=0, dest="target_cents")
+    plan_adj.add_argument("--finish", default="")
+    plan_adj.add_argument("--per-period-cents", type=int, default=0, dest="per_period_cents")
+    plan_adj.add_argument("--cadence", default="")
+    plan_adj.set_defaults(func=cmd_plan_adjust)
+
+    plan_item = planning_sub.add_parser("item", help="add something a trip pays for")
+    _add_person_flags(plan_item)
+    plan_item.add_argument("--id", type=int, required=True)
+    plan_item.add_argument("--description", required=True)
+    plan_item.add_argument("--amount-cents", type=int, required=True, dest="amount_cents")
+    plan_item.add_argument("--kind", default="other", choices=("flight", "accommodation", "other"))
+    plan_item.set_defaults(func=cmd_plan_item)
+
+    plan_go = planning_sub.add_parser("activate", help="start a draft")
+    _add_person_flags(plan_go)
+    plan_go.add_argument("--id", type=int, required=True)
+    plan_go.set_defaults(func=cmd_plan_activate)
+
+    plan_stop = planning_sub.add_parser("abandon", help="stop a plan")
+    _add_person_flags(plan_stop)
+    plan_stop.add_argument("--id", type=int, required=True)
+    plan_stop.set_defaults(func=cmd_plan_abandon)
+
+    plan_put = planning_sub.add_parser("contribute", help="record money you put aside")
+    _add_person_flags(plan_put)
+    plan_put.add_argument("--id", type=int, required=True)
+    plan_put.add_argument("--amount-cents", type=int, required=True, dest="amount_cents")
+    plan_put.set_defaults(func=cmd_plan_contribute)
 
     approvals = sub.add_parser("approvals", help="purchases waiting on a sponsor")
     approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)

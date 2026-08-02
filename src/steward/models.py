@@ -8,7 +8,7 @@ of it existing rather than each layer minting its own timestamp format.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 
 def utc_now_iso() -> str:
@@ -25,9 +25,30 @@ def iso_since(seconds: int) -> str:
     return (datetime.now(UTC) - timedelta(seconds=seconds)).replace(microsecond=0).isoformat()
 
 
+def utc_today() -> date:
+    """Today, as one function so there is one clock to stub.
+
+    Anything that starts a schedule reads this rather than taking a date from a
+    caller. A model that could choose its own start date could backdate a
+    savings plan, which would make it report progress on money nobody put aside.
+    """
+    return datetime.now(UTC).date()
+
+
 def new_id(prefix: str) -> str:
     """Prefixed ids so a bare string in a log says what it identifies."""
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
+
+
+# One symbol map. It had begun to appear separately in the CLI, the router and
+# the bank parser; a fourth copy would have been the point where two of them
+# quietly disagreed about what a currency looks like.
+_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€"}
+
+
+def money(amount_cents: int, currency: str) -> str:
+    """Integer minor units as a person reads them: `£4.50 GBP`."""
+    return f"{_SYMBOLS.get(currency, '')}{amount_cents / 100:,.2f} {currency}".strip()
 
 
 class Role:

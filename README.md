@@ -15,7 +15,28 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-Phase 5 of 8. Two humans transact by text.
+Phase 6 of 8. Plans a person shaped — and steward is honest when the numbers
+do not work.
+
+```
+$ steward plan propose --name Lisbon --kind trip \
+    --target-cents 60000 --finish 2026-11-02 --per-period-cents 5000
+
+     1  Lisbon  [draft]  short £450.00 GBP
+        £50.00 GBP a month × 3 → £150.00 GBP of £600.00 GBP by 2026-11-02
+
+  three ways to close the gap  (your call, not mine)
+        take_longer      £600.00 GBP at £50.00 GBP by 2027-08-02
+                         9 more months at the same amount
+        smaller_goal     £150.00 GBP at £50.00 GBP by 2026-11-02
+                         what this schedule actually reaches by then
+        more_each_time   £600.00 GBP at £200.00 GBP by 2026-11-02
+                         keep the goal and the date, and put aside more each time
+
+it does nothing until you start it:  steward plan activate --id 1
+```
+
+Two humans still transact by text — phase 5's flow is unchanged.
 
 ```
 Ana texts her line  +447700900002
@@ -237,6 +258,33 @@ file is most of its value. It invents no limits (a default budget chosen by a
 program is a decision about someone's money that nobody made) and refuses to
 re-grant rather than overwriting limits that may have been hand-edited since.
 
+## Plans: shaped by the person, advisory to steward
+
+A savings schedule is three numbers and a rhythm — **how much**, **by when**,
+**how much each time**. Fix any two and the third follows; that is the whole
+interaction. When it does not add up, it says so and offers three options with
+identical shapes and no recommendation, because which of *later*, *less* or
+*more each time* is right depends on what the goal is for and how tight the
+money is — neither of which steward knows.
+
+A draft does nothing. **Only a person activates a plan** — by CLI, or by texting
+"start that plan" — and the model has no tool for it, exactly as it has none for
+confirming a fact or approving a purchase. It has none for abandoning one
+either: releasing a commitment is the same authority as making it. The start
+date is not the model's to choose, because a backdated plan reports progress on
+money nobody put aside.
+
+**An active plan warns; it never blocks.** steward has no bank access, so a plan
+is a promise about money it does not hold. When a purchase would set a goal
+back, the result carries what it costs — "1 month, November becomes December" —
+and pay-warden still makes the actual decision. Nothing edits a sponsor's policy
+to protect a spender's goal.
+
+Flights and places to stay always need a person to book. That flag is computed
+in `store.py` from the item kind, so no layer above can clear it, and **nothing
+in `plan/` imports `spend/`** — there is no code path from a plan item to a
+payment at all, which a test enforces by reading the imports.
+
 ## Two kinds of memory
 
 **Facts drive decisions; episodes are colour.** A fact is structured, keyed and
@@ -275,6 +323,9 @@ src/steward/
   catalogue/
     fixtures.py    the modelled storefront, and why it is modelled
     search.py      offers, ordering, and price integrity at purchase
+  plan/
+    schedule.py    the arithmetic; honest when it does not add up
+    goals.py       drafts, activation, and what a purchase costs a goal
   spend/
     warden.py      the MCP client to pay-warden; the only path to money
     purchase.py    blocked / escalated / approved / paid
