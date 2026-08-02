@@ -429,14 +429,27 @@ episode is a sentence someone said, retrieved by resemblance, and it exists so
 the agent sounds like it was listening. Nothing that spends money reads from
 episodic memory, and the tool description tells the model so.
 
-Embedding is local and dependency-free: a hashed bag of words, `blake2b` so
-vectors survive a restart. It is a *lexical* matcher — "out of soap" will not
-match "need to restock hand wash" — which is written down rather than glossed,
-because the alternative is sending every conversational turn to an embeddings
-API and trading the privacy argument for better recall on the feature that
-matters least. The `Embedder` protocol is the seam for pointing this at the
-same local Ollama the extractor uses, which would understand that soap and hand
-wash are the same errand — still without anything leaving the device.
+Embedding is local and dependency-free by default: a hashed bag of words,
+`blake2b` so vectors survive a restart. It is a *lexical* matcher — "out of
+soap" will not match "need to restock hand wash" — which is written down rather
+than glossed, because the alternative is sending every conversational turn to an
+embeddings API and trading the privacy argument for better recall on the feature
+that matters least.
+
+`STEWARD_EMBEDDING_MODEL` points the `Embedder` seam at the same local Ollama the
+extractor uses, which does understand that soap and hand wash are the same
+errand — still without anything leaving the device, and answering to the same
+loopback check for the same reason. It is off unless asked for, because vectors
+of different widths are never compared: switching embedders makes everything
+already remembered invisible until `steward memory reindex` re-encodes it, and a
+default that silently rewrote what somebody's memory finds would be the wrong
+kind of upgrade. Re-encoding is possible at all because the text is stored beside
+the vector — reindexing changes the representation and never the sentence.
+
+If the model is unreachable mid-conversation, `remember` and `search` fall back
+to the lexical matcher rather than failing: a narrower memory, not a lost one.
+`memory reindex` is where that fallback is reported, because that is where
+somebody is actually asking.
 
 ## Layout
 

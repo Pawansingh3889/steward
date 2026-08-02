@@ -589,6 +589,22 @@ def list_episodes(
         return _rows(conn.execute(sql, (person_id,)))
 
 
+def set_episode_embedding(episode_id: int, embedding: bytes, db_path: str | None = None) -> None:
+    """Replace one episode's vector, leaving its text and its history alone.
+
+    The only writer for reindexing. It cannot touch `text`, which is what makes
+    re-encoding a change of representation rather than a chance to quietly edit
+    what somebody said.
+    """
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE episodes SET embedding = ? WHERE id = ? AND deleted_ts = ''",
+            (embedding, episode_id),
+        )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"no live episode {episode_id} to reindex")
+
+
 def get_episode(episode_id: int, db_path: str | None = None) -> dict[str, Any] | None:
     with transaction(db_path) as conn:
         return _row(conn.execute("SELECT * FROM episodes WHERE id = ?", (episode_id,)))

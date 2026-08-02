@@ -22,7 +22,7 @@ from typing import Any
 
 from .. import store
 from . import embed
-from .embed import Embedder, HashingEmbedder
+from .embed import Embedder
 
 DEFAULT_LIMIT = 5
 # Below this, a "match" is hash noise rather than a resemblance. Tuned against
@@ -37,6 +37,25 @@ class Episode:
     text: str
     created_ts: str
     similarity: float
+
+
+def _encode(embedder: Embedder, text: str) -> list[float]:
+    """Encode, and fall back to the lexical matcher if the model cannot.
+
+    Reaching a model that is running is checked once, at construction. This is
+    the other half: a local model can be resident and still fail a single call —
+    a cold start that outruns the timeout is the ordinary case, and the first
+    real run of this hit exactly that.
+
+    Episodic memory is conversational colour. Taking somebody's whole turn down
+    because an embedding was slow would trade the thing they asked for against
+    the thing they did not. The lexically-encoded episode is a narrower memory,
+    not a lost one, and `memory reindex` upgrades it later.
+    """
+    try:
+        return embedder.encode(text)
+    except embed.EmbeddingError:
+        return embed.HashingEmbedder().encode(text)
 
 
 def remember(
@@ -67,10 +86,10 @@ def remember(
     piece of text is worth keeping. Widening the stopword list to fake it would
     cost recall everywhere else for a cosmetic win here.
     """
-    embedder = embedder or HashingEmbedder()
+    embedder = embedder or embed.build()
     if not embed.tokenize(text):
         return None
-    vector = embedder.encode(text)
+    vector = _encode(embedder, text)
     return store.insert_episode(
         person_id=person_id,
         text=text,
@@ -95,8 +114,8 @@ def search(
     query. An agent handed a weak match treats it as evidence, and "you
     mentioned you were out of soap" is worse than silence when they never did.
     """
-    embedder = embedder or HashingEmbedder()
-    target = embedder.encode(query)
+    embedder = embedder or embed.build()
+    target = _encode(embedder, query)
     scored: list[Episode] = []
     for row in store.list_episodes(person_id, db_path=db_path):
         vector = embed.unpack(bytes(row["embedding"]))
@@ -131,4 +150,55 @@ def as_dict(episode: Episode) -> dict[str, Any]:
         "text": episode.text,
         "at": episode.created_ts,
         "similarity": episode.similarity,
+    }
+
+
+def reindex(
+    person_id: int,
+    *,
+    embedder: Embedder | None = None,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    """Re-embed everything already remembered, with the current embedder.
+
+    Needed because vectors of different widths are never compared — `search`
+    skips them rather than producing a confident meaningless number. That is the
+    right behaviour and it means switching embedders makes existing episodes
+    invisible until this has run. Silently losing somebody's history on a config
+    change would be worse than making them ask for it back.
+
+    Re-embedding is possible at all because the text is stored beside the
+    vector. An episode store that kept only vectors could never change its mind
+    about how to encode them.
+
+    Raises `embed.EmbeddingError` if the model gives out part-way through,
+    naming how far it got. Reindexing is idempotent, so running it again after
+    the model is behaving costs nothing but time.
+    """
+    embedder = embedder or embed.build()
+    rows = store.list_episodes(person_id, db_path=db_path)
+    done = skipped = 0
+    for row in rows:
+        text = str(row["text"])
+        if not embed.tokenize(text):
+            skipped += 1
+            continue
+        try:
+            vector = embedder.encode(text)
+        except embed.EmbeddingError as exc:
+            # Pointedly *not* `_encode`'s fallback. Writing a lexical vector
+            # here would leave two widths in one person's store, and whichever
+            # set does not match the embedder in force goes silently
+            # unsearchable — precisely the state this command exists to repair.
+            # Stopping half-done and saying so is the recoverable failure.
+            raise embed.EmbeddingError(
+                f"stopped after reindexing {done} of {len(rows)} episode(s): {exc}"
+            ) from exc
+        store.set_episode_embedding(int(row["id"]), embed.pack(vector), db_path=db_path)
+        done += 1
+    return {
+        "reindexed": done,
+        "skipped": skipped,
+        "embedder": type(embedder).__name__,
+        "dimensions": getattr(embedder, "dimensions", 0),
     }

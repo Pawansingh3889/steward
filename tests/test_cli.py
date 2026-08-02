@@ -164,6 +164,55 @@ def test_a_search_that_finds_nothing_says_so(
     assert "never said" in capsys.readouterr().out
 
 
+def test_reindexing_reports_which_embedder_actually_ran(
+    db: str, person: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The interesting failure is a silent fallback to the lexical matcher when
+    Ollama was meant to be answering, so the command says which one it used and
+    why — naming the refusal, not a generic "unreachable"."""
+    episodic.remember(person_id=person, text="I'm out of soap again", db_path=db)
+
+    assert run(db, "memory", "reindex") == 0
+    out = capsys.readouterr().out
+    assert "reindexed 1 episode(s)" in out
+    assert "HashingEmbedder" in out
+    # Unset, so no fallback notice: this is a working install, not a degraded one.
+    assert "fell back" not in out
+
+
+def test_reindexing_says_why_it_fell_back_to_the_lexical_matcher(
+    db: str, person: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("STEWARD_EMBEDDING_MODEL", "nomic-embed-text")
+    monkeypatch.setenv("OLLAMA_BASE", "http://192.168.1.50:11434")
+    episodic.remember(person_id=person, text="I'm out of soap again", db_path=db)
+
+    assert run(db, "memory", "reindex") == 0
+
+    out = capsys.readouterr().out
+    assert "fell back" in out
+    assert "not on this machine" in out
+
+
+def test_a_reindex_that_gives_out_part_way_exits_rather_than_tracing_back(
+    db: str, person: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every other failing command in this file exits with a message. This one
+    also has to say how far it got, because it stops with the store half
+    re-encoded and the person needs to know to run it again."""
+    from steward.memory import embed
+
+    episodic.remember(person_id=person, text="I'm out of soap again", db_path=db)
+
+    def die(*args: object, **kwargs: object) -> None:
+        raise embed.EmbeddingError("timed out")
+
+    monkeypatch.setattr("steward.memory.embed.HashingEmbedder.encode", die)
+
+    with pytest.raises(SystemExit, match="stopped after reindexing 0 of 1"):
+        run(db, "memory", "reindex")
+
+
 def test_json_output_is_machine_readable(
     db: str, person: int, capsys: pytest.CaptureFixture[str]
 ) -> None:

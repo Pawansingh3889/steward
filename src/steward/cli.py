@@ -828,6 +828,41 @@ def cmd_approvals_decline(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_reindex(args: argparse.Namespace) -> int:
+    """Re-encode what is already remembered with the embedder in force.
+
+    Vectors of different widths are never compared, so switching embedders
+    leaves existing episodes unfindable until this runs. It reports which
+    embedder it used, because the interesting failure is a silent fallback to
+    the lexical one when Ollama was meant to be answering.
+    """
+    from .memory import embed, episodic
+
+    person = _resolve_person(args)
+    try:
+        result = episodic.reindex(int(person["id"]), db_path=args.db)
+    except embed.EmbeddingError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _out(json.dumps(result, indent=2))
+        return 0
+    _out(f"\nreindexed {result['reindexed']} episode(s) for {person['name']}")
+    if result["skipped"]:
+        _out(f"{DIM}skipped {result['skipped']} with nothing to embed{RESET}")
+    # No width until something has actually been encoded: a local model's is
+    # discovered from its first answer, so "0 dimensions" would be a lie about
+    # the embedder rather than a fact about it.
+    width = f", {result['dimensions']} dimensions" if result["dimensions"] else ""
+    _out(f"{DIM}using {result['embedder']}{width}{RESET}")
+    if result["embedder"] == "HashingEmbedder" and config.embedding_model():
+        _out(
+            f"{DIM}STEWARD_EMBEDDING_MODEL is set but {embed.why_lexical()} —"
+            f" this fell back to the lexical matcher.{RESET}"
+        )
+    _out()
+    return 0
+
+
 # --- the dashboard -----------------------------------------------------------
 
 
@@ -1198,6 +1233,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="your own words, kept apart from the rule the policy engine gave",
     )
     declining.set_defaults(func=cmd_approvals_decline)
+
+    reindexing = memory_sub.add_parser(
+        "reindex", help="re-encode remembered episodes with the current embedder"
+    )
+    _add_person_flags(reindexing)
+    reindexing.set_defaults(func=cmd_memory_reindex)
 
     serving = sub.add_parser("serve", help="a read-only dashboard for one sponsor")
     # Deliberately not _add_person_flags: that resolver falls back to "the only

@@ -232,3 +232,213 @@ def test_the_full_answer_is_never_truncated(person: int, db: str) -> None:
         episodic.remember(person_id=person, text=f"thing number {n} about soap", db_path=db)
 
     assert recall.everything(person, db_path=db)["counts"]["episodes"] == 40
+
+
+# --- the local embedder ------------------------------------------------------
+
+
+class FakeOllama:
+    """A local model that knows soap and hand wash are the same errand.
+
+    Deliberately not a real embedding model: what these tests are about is the
+    wiring, the fallback and the width, none of which need a model to be right
+    about language.
+    """
+
+    def __init__(self, dimensions: int = 8) -> None:
+        self.dimensions = dimensions
+        self.calls: list[str] = []
+
+    def encode(self, text: str) -> list[float]:
+        self.calls.append(text)
+        soapy = any(word in text.lower() for word in ("soap", "hand wash", "washing"))
+        vector = [1.0, 0.0] if soapy else [0.0, 1.0]
+        return embed.normalize(vector + [0.0] * (self.dimensions - 2))
+
+
+def test_a_local_model_matches_what_the_lexical_one_cannot(db: str, person: int) -> None:
+    """The whole reason for this: "out of soap" and "need hand wash" share no
+    tokens, so the hashing embedder scores them zero however good it is."""
+    lexical = embed.HashingEmbedder()
+
+    assert (
+        embed.similarity(
+            lexical.encode("I'm out of soap"), lexical.encode("need to restock hand wash")
+        )
+        == 0.0
+    )
+
+    model = FakeOllama()
+    episodic.remember(person_id=person, text="I'm out of soap", embedder=model, db_path=db)
+
+    found = episodic.search(
+        person_id=person, query="need to restock hand wash", embedder=model, db_path=db
+    )
+
+    assert [e.text for e in found] == ["I'm out of soap"]
+
+
+def test_vectors_of_different_widths_are_never_compared(db: str, person: int) -> None:
+    """Written by the old embedder, searched with the new one. Skipping is the
+    only honest answer — comparing them produces a confident, meaningless
+    number, which is worse than finding nothing."""
+    episodic.remember(
+        person_id=person, text="I'm out of soap", embedder=embed.HashingEmbedder(), db_path=db
+    )
+
+    found = episodic.search(person_id=person, query="soap", embedder=FakeOllama(), db_path=db)
+
+    assert found == []
+
+
+def test_reindexing_makes_the_old_episodes_findable_again(db: str, person: int) -> None:
+    """Which is why switching embedders is not complete without it. Silently
+    losing somebody's history on a config change would be worse than asking."""
+    episodic.remember(
+        person_id=person, text="I'm out of soap", embedder=embed.HashingEmbedder(), db_path=db
+    )
+    model = FakeOllama()
+
+    result = episodic.reindex(person, embedder=model, db_path=db)
+
+    assert result["reindexed"] == 1
+    assert result["dimensions"] == 8
+    again = episodic.search(person_id=person, query="hand wash", embedder=model, db_path=db)
+    assert [e.text for e in again] == ["I'm out of soap"]
+
+
+def test_reindexing_re_encodes_and_never_rewrites_what_was_said(db: str, person: int) -> None:
+    """It is a change of representation. The text is the person's."""
+    episodic.remember(person_id=person, text="I'm out of soap", db_path=db)
+    before = store.list_episodes(person, db_path=db)[0]
+
+    episodic.reindex(person, embedder=FakeOllama(), db_path=db)
+
+    after = store.list_episodes(person, db_path=db)[0]
+    assert after["text"] == before["text"]
+    assert after["embedding"] != before["embedding"]
+
+
+def test_an_unset_model_means_the_lexical_matcher(monkeypatch) -> None:
+    monkeypatch.setenv("STEWARD_EMBEDDING_MODEL", "")
+
+    assert isinstance(embed.build(), embed.HashingEmbedder)
+
+
+def test_an_unreachable_local_model_falls_back_rather_than_failing(monkeypatch) -> None:
+    """Recall is conversational colour. Taking a whole conversation down because
+    Ollama is not running would be the wrong trade — and `memory reindex` is
+    where somebody is actually asking, so that is where it is reported."""
+    monkeypatch.setenv("STEWARD_EMBEDDING_MODEL", "nomic-embed-text")
+    monkeypatch.setattr("steward.extract.local.available", lambda **kwargs: False)
+
+    assert isinstance(embed.build(), embed.HashingEmbedder)
+
+
+def test_the_embedder_refuses_a_host_that_is_not_this_machine(monkeypatch) -> None:
+    """It sends the same raw sentences the extractor does, so it answers to the
+    same rule — reused rather than reimplemented, because a second copy is a
+    second thing to get wrong."""
+    from steward.extract import local
+
+    monkeypatch.setenv("OLLAMA_BASE", "http://192.168.1.50:11434")
+    monkeypatch.setenv("STEWARD_LOCAL_LLM_ALLOW_REMOTE", "")
+
+    with pytest.raises(local.LocalModelError, match="STEWARD_LOCAL_LLM_ALLOW_REMOTE"):
+        embed.OllamaEmbedder("nomic-embed-text")
+
+
+def test_a_model_that_fails_mid_conversation_does_not_take_the_turn_down(
+    db: str, person: int
+) -> None:
+    """Reachability is checked once, at construction. This is the other half: a
+    resident model can still fail a single call, and the first real run of this
+    hit exactly that — an 8B model cold-starting outran the timeout and the
+    error came out through `remember`.
+
+    A lexically-encoded episode is a narrower memory, not a lost one.
+    """
+
+    class ColdStart:
+        dimensions = 8
+
+        def encode(self, text: str) -> list[float]:
+            raise embed.EmbeddingError("timed out")
+
+    episodic.remember(person_id=person, text="I'm out of soap", embedder=ColdStart(), db_path=db)
+
+    stored = store.list_episodes(person, db_path=db)
+    assert [row["text"] for row in stored] == ["I'm out of soap"]
+    # Encoded by the fallback, so it is findable the lexical way meanwhile.
+    found = episodic.search(person_id=person, query="soap", db_path=db)
+    assert [e.text for e in found] == ["I'm out of soap"]
+
+
+def test_a_model_that_gives_out_stops_the_reindex_rather_than_mixing_widths(
+    db: str, person: int
+) -> None:
+    """`remember` falls back to lexical mid-conversation; reindex must not. Two
+    widths in one store means whichever set does not match the current embedder
+    goes silently unsearchable — the exact state this command exists to repair.
+    Stopping half-done and saying how far it got is the recoverable failure."""
+
+    class DiesOnTheSecond:
+        dimensions = 8
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def encode(self, text: str) -> list[float]:
+            self.calls += 1
+            if self.calls > 1:
+                raise embed.EmbeddingError("timed out")
+            return embed.normalize([1.0] + [0.0] * 7)
+
+    for text in ("I'm out of soap", "the boiler man comes Thursday"):
+        episodic.remember(person_id=person, text=text, db_path=db)
+
+    with pytest.raises(embed.EmbeddingError, match="stopped after reindexing 1 of 2"):
+        episodic.reindex(person, embedder=DiesOnTheSecond(), db_path=db)
+
+
+def test_a_non_numeric_embedding_is_an_embedding_error_not_a_value_error() -> None:
+    """Everything out of `encode` has to be EmbeddingError, because that is the
+    single type callers fall back on. A bare ValueError would sail past
+    `_encode` and take somebody's whole turn down."""
+    import httpx
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"embedding": ["not", "a", "vector"]})
+    )
+
+    with pytest.raises(embed.EmbeddingError, match="non-numeric"):
+        embed.OllamaEmbedder("nomic-embed-text", http=httpx.Client(transport=transport)).encode(
+            "I'm out of soap"
+        )
+
+
+def test_a_refused_host_is_not_reported_as_an_unreachable_one(monkeypatch) -> None:
+    """The two want different things done about them, and only one of them is
+    "start Ollama". Sending somebody to debug a service while their OLLAMA_BASE
+    points off the device is the one wrong answer that really costs."""
+    monkeypatch.setenv("STEWARD_EMBEDDING_MODEL", "nomic-embed-text")
+    monkeypatch.setenv("OLLAMA_BASE", "http://192.168.1.50:11434")
+    monkeypatch.setenv("STEWARD_LOCAL_LLM_ALLOW_REMOTE", "")
+
+    assert "refused" in embed.why_lexical()
+    assert isinstance(embed.build(), embed.HashingEmbedder)
+
+    monkeypatch.setenv("OLLAMA_BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr("steward.extract.local.available", lambda **kwargs: False)
+
+    assert "nothing answered" in embed.why_lexical()
+
+
+def test_nothing_explains_away_a_working_model(monkeypatch) -> None:
+    """ "" means build() really is handing back the local one — the notice in
+    `memory reindex` hangs off this being empty."""
+    monkeypatch.setenv("STEWARD_EMBEDDING_MODEL", "nomic-embed-text")
+    monkeypatch.setattr("steward.extract.local.available", lambda **kwargs: True)
+
+    assert embed.why_lexical() == ""
+    assert isinstance(embed.build(), embed.OllamaEmbedder)

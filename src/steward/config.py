@@ -91,6 +91,18 @@ def ollama_model() -> str:
     return _str("OLLAMA_MODEL") or DEFAULT_OLLAMA_MODEL
 
 
+def embedding_model() -> str:
+    """Which local model embeds episodes, or empty for the built-in matcher.
+
+    Off unless asked for, like every other switch here. Turning it on changes
+    what recall finds — the vectors are a different width, so episodes written
+    by the old embedder stop matching until they are reindexed — and a default
+    that silently rewrote the meaning of somebody's memory would be the wrong
+    kind of upgrade.
+    """
+    return _str("STEWARD_EMBEDDING_MODEL")
+
+
 def local_llm_allow_remote() -> bool:
     """Opt-in to sending unredacted text to a non-loopback Ollama.
 

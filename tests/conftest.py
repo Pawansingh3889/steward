@@ -30,6 +30,10 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("OLLAMA_BASE", "http://127.0.0.1:11434")
     monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
     monkeypatch.setenv("STEWARD_LOCAL_LLM_ALLOW_REMOTE", "")
+    # Pinned for the same reason, and it bites harder: unset is a *different
+    # embedder*, so a developer with this exported would have the memory tests
+    # reach for Ollama and die on the no-network guard below.
+    monkeypatch.setenv("STEWARD_EMBEDDING_MODEL", "")
     # config._load_env() reads a real .env if one exists and setdefault means a
     # developer's live key would win over the pins above. Point it at a path
     # that cannot exist so the suite is identical on every machine.
