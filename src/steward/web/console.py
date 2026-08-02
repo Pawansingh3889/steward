@@ -35,7 +35,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from .. import store
-from ..models import Role, utc_now_iso
+from ..models import Role, money, utc_now_iso
 from ..spend import purchase
 from ..surface.base import Inbound, RecordingChannel
 from ..surface.router import Router
@@ -53,10 +53,11 @@ class Console:
         self.db_path = db_path
         self.channel = RecordingChannel()
         self.router = Router(db_path=db_path, channel=self.channel, **router_kwargs)
-        # What a human typed. Outbound is read off the channel, so the only
-        # thing this needs to remember is the half the channel never sees.
-        self.typed: list[dict[str, Any]] = []
-        self.seen = 0
+        # One list, in the order things happened. It was two — what a person
+        # typed, and what the channel recorded — read back concatenated, which
+        # put every question before every answer no matter when either was
+        # said. A conversation is a sequence, so it is stored as one.
+        self.log: list[dict[str, Any]] = []
 
     def people(self) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         rows = store.list_people(db_path=self.db_path)
@@ -71,40 +72,50 @@ class Console:
         return sponsor, spenders
 
     def say(self, person: dict[str, Any], body: str) -> dict[str, Any]:
-        """Put a message on the wire as if it had been texted."""
-        self.typed.append(
-            {
-                "person_id": int(person["id"]),
-                "who": str(person["name"]),
-                "body": body,
-                "at": utc_now_iso(),
-                "inbound": True,
-            }
-        )
+        """Put a message on the wire as if it had been texted.
+
+        The reply is drained off the channel straight afterwards, so what the
+        log holds is the real sequence: this message, then whatever it caused,
+        then the next one. A single turn can produce messages on both lines —
+        an escalation answers the spender and asks the sponsor — and both land
+        here in the order the router sent them.
+        """
+        self._append(int(person["id"]), str(person["name"]), body, inbound=True)
+        before = len(self.channel.sent)
         handled = self.router.receive(Inbound(sender=str(person["phone"]), body=body))
+        for delivery in self.channel.sent[before:]:
+            self._append(
+                int(delivery.outbound.person_id),
+                "steward",
+                delivery.outbound.body,
+                inbound=False,
+                about=delivery.outbound.about,
+            )
         return {"kind": handled.kind, "detail": handled.detail}
 
+    def _append(
+        self, person_id: int, who: str, body: str, *, inbound: bool, about: str = ""
+    ) -> None:
+        self.log.append(
+            {
+                "seq": len(self.log),
+                "person_id": person_id,
+                "who": who,
+                "body": body,
+                "at": utc_now_iso(),
+                "inbound": inbound,
+                "about": about,
+            }
+        )
+
     def transcript(self, person_id: int) -> list[dict[str, Any]]:
-        """Everything on one line, in order.
+        """One line's half of the log, still in order.
 
         Filtered by `person_id`, which is what makes the sponsor's pane unable
         to show the spender's conversation: the channel addresses a person, and
         nothing steward sends to Rae was ever addressed to Ana.
         """
-        lines = [row for row in self.typed if row["person_id"] == person_id]
-        lines += [
-            {
-                "person_id": person_id,
-                "who": "steward",
-                "body": delivery.outbound.body,
-                "at": "",
-                "inbound": False,
-                "about": delivery.outbound.about,
-            }
-            for delivery in self.channel.sent
-            if delivery.outbound.person_id == person_id
-        ]
-        return lines
+        return [row for row in self.log if row["person_id"] == person_id]
 
     def waiting(self, sponsor_id: int) -> list[dict[str, Any]]:
         return purchase.pending_for_sponsor(sponsor_id, db_path=self.db_path)
@@ -150,40 +161,89 @@ CONSOLE_SCRIPT_HTML = """<script>
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+let busy = false;
+
 function draw(who, rows) {
   const el = document.getElementById("thread-" + who);
   if (!el) return;
+  // Only redraw when something changed, or the thread scrolls itself back to
+  // the bottom every second and a long reply cannot be read.
+  const signature = rows.map(r => r.seq).join(",");
+  if (el.dataset.sig === signature) return;
+  el.dataset.sig = signature;
+  const stuck = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   el.innerHTML = rows.length ? rows.map(r =>
     `<div class="bubble ${r.inbound ? "them" : "agent"}">
        <div class="bubble-who">${esc(r.who)}</div><p>${esc(r.body)}</p></div>`).join("")
     : `<p class="empty">Nothing said yet.</p>`;
-  el.scrollTop = el.scrollHeight;
+  if (stuck) el.scrollTop = el.scrollHeight;
+}
+
+function drawPending(waiting) {
+  const el = document.getElementById("pending");
+  if (!el) return;
+  if (!waiting.length) { el.innerHTML = ""; return; }
+  const w = waiting[0];
+  el.innerHTML = `<div class="pending">
+    <div>${esc(w.description)} <span class="amount">${esc(w.amount)}</span></div>
+    <div class="rule">${esc(w.reason)}</div>
+    <div class="acts">
+      <button class="yes" data-say="yes">Approve</button>
+      <button class="no" data-say="no">Decline</button>
+    </div>
+    <p class="caveat">These send the words &ldquo;yes&rdquo; and &ldquo;no&rdquo; from this line.
+      There is no other approval path &mdash; the button is a shortcut for typing, not a way
+      around the router.</p>
+  </div>`;
+  el.querySelectorAll("[data-say]").forEach(b => { b.onclick = () => say("sponsor", b.dataset.say); });
 }
 
 async function refresh() {
-  const r = await fetch("/state");
-  if (!r.ok) return;
-  const s = await r.json();
+  let s;
+  try {
+    const r = await fetch("/state");
+    if (!r.ok) return;
+    s = await r.json();
+  } catch { return; }
   if (!s.ready) return;
   draw("spender", s.spender);
   draw("sponsor", s.sponsor);
+  drawPending(s.waiting);
+}
+
+function thinking(on) {
+  busy = on;
+  document.querySelectorAll(".thinking").forEach(el => { el.hidden = !on; });
+  document.querySelectorAll("form.composer button").forEach(b => { b.disabled = on; });
 }
 
 async function say(who, text) {
-  const busy = document.getElementById("busy-" + who);
-  if (busy) busy.hidden = false;
+  if (busy) return;
+  // A single-line page speaks only as its own line. There is no login here, so
+  // this is not a security boundary — it is the page refusing to offer an
+  // action it has no business offering, which is the half that shows up in a
+  // screenshot.
+  if (!document.getElementById("thread-" + who)) return;
+  thinking(true);
+  // Shown at once, before the model has answered. The agent can take many
+  // seconds and a message that vanishes on send reads as a dropped one.
+  const el = document.getElementById("thread-" + who);
+  if (el) {
+    el.insertAdjacentHTML("beforeend",
+      `<div class="bubble them pending-send"><div class="bubble-who">sending…</div>
+         <p>${esc(text)}</p></div>`);
+    el.dataset.sig = "";
+    el.scrollTop = el.scrollHeight;
+  }
   try {
     await fetch("/say", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({who, text}),
     });
-    // A reply can change what is waiting, so the page is rebuilt rather than
-    // patched — the approve panel is server-rendered from the escalation table.
-    location.reload();
-  } finally {
-    if (busy) busy.hidden = true;
-  }
+  } catch { /* the poll below will show whatever did land */ }
+  thinking(false);
+  await refresh();
 }
 
 document.querySelectorAll("form.composer").forEach(form => {
@@ -191,7 +251,7 @@ document.querySelectorAll("form.composer").forEach(form => {
     e.preventDefault();
     const input = form.querySelector("input");
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || busy) return;
     input.value = "";
     say(form.dataset.who, text);
   };
@@ -202,6 +262,9 @@ document.querySelectorAll("[data-say]").forEach(button => {
 });
 
 refresh();
+// Slow, because the other handset is the only thing that changes this page
+// while you are not typing on it.
+setInterval(() => { if (!busy) refresh(); }, 2000);
 </script>"""
 
 
@@ -245,13 +308,22 @@ def one_line_page(console: Console, role: str) -> str:
     if sponsor is None or not spenders:
         return _nobody_page()
     person = sponsor if role == "sponsor" else spenders[0]
-    pending_html = _pending_html(console, sponsor) if role == "sponsor" else ""
+    # Only the sponsor's page carries the approval panel — and it carries the
+    # container too, not just the contents. The script fills `#pending` by id,
+    # so leaving an empty one on the spender's page had it drawing the
+    # sponsor's queue there: Rae's decisions on Ana's screen, with buttons that
+    # posted as Rae. The absence has to be structural, not a blank string.
+    controls_html = (
+        f'<div class="controls" id="pending">{_pending_html(console, sponsor)}</div>'
+        if role == "sponsor"
+        else ""
+    )
     body_html = (
         '<header class="banner solo"><h1>steward</h1>'
         f'<p class="who">{render.text(person["name"])} · '
         f'{render.text(role)}<span class="chip">DEMO</span></p></header>'
         f'<div class="lines solo">{_line_html(person, console.transcript(int(person["id"])), role)}</div>'
-        f'<div class="controls">{pending_html}</div>'
+        f"{controls_html}"
         f"{CONSOLE_SCRIPT_HTML}"
     )
     return render.document(
@@ -297,7 +369,7 @@ def page(console: Console, base_url: str = "") -> str:
         f'{_line_html(spender, console.transcript(int(spender["id"])), "spender")}'
         f'{_line_html(sponsor, console.transcript(int(sponsor["id"])), "sponsor")}'
         "</div>"
-        f'<div class="controls">{_pending_html(console, sponsor)}</div>'
+        f'<div class="controls" id="pending">{_pending_html(console, sponsor)}</div>'
         f"{qr_html(base_url)}"
         f"{CONSOLE_SCRIPT_HTML}"
     )
@@ -347,11 +419,20 @@ def build_console_app(console: Console, *, base_url: str = "") -> Starlette:
             sponsor, spenders = console.people()
             if sponsor is None or not spenders:
                 return {"ready": False}
+            waiting = console.waiting(int(sponsor["id"]))
             return {
                 "ready": True,
                 "spender": console.transcript(int(spenders[0]["id"])),
                 "sponsor": console.transcript(int(sponsor["id"])),
-                "waiting": len(console.waiting(int(sponsor["id"]))),
+                "waiting": [
+                    {
+                        "id": int(row["id"]),
+                        "description": str(row["description"]),
+                        "amount": money(int(row["amount_cents"]), str(row["currency"])),
+                        "reason": str(row["reason"]),
+                    }
+                    for row in waiting
+                ],
             }
 
         return JSONResponse(await run_in_threadpool(build))

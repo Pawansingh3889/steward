@@ -248,3 +248,91 @@ def test_the_page_renders_only_ids_the_script_looks_for(db: str, household: tupl
     for prefix, _ in wanted:
         assert f'id="{prefix}-spender"' in body
         assert f'id="{prefix}-sponsor"' in body
+
+
+# --- order --------------------------------------------------------------------
+
+
+def test_a_reply_lands_after_the_message_that_caused_it(
+    db: str, household: tuple[int, int]
+) -> None:
+    """The transcript was two lists read back concatenated — everything typed,
+    then everything answered — so every question sorted before every answer no
+    matter when either was said. Three turns is the smallest case that catches
+    it: with one, concatenation and sequence look identical.
+    """
+    _, spender = household
+    model = OpenAIStub(
+        [completion(content="first answer"), completion(content="second answer")]
+    )
+    console = console_for(db, http=model.client())
+    ana = store.get_person(spender, db_path=db)
+
+    console.say(ana, "one")
+    console.say(ana, "two")
+
+    assert [row["body"] for row in console.transcript(spender)] == [
+        "one",
+        "first answer",
+        "two",
+        "second answer",
+    ]
+
+
+def test_an_escalation_keeps_its_order_on_both_lines(
+    db: str, household: tuple[int, int]
+) -> None:
+    """One turn can produce messages on two lines. Each has to sit after the
+    message that caused it on its own line, and neither may appear on the other."""
+    sponsor, spender = household
+    purchase.buy(person_id=spender, **SOAP, db_path=db, client=WardenStub([parked()]))
+    console = console_for(db, warden=WardenStub([]))
+
+    console.say(store.get_person(sponsor, db_path=db), "what is waiting")
+
+    raes = console.transcript(sponsor)
+    assert raes[0]["body"] == "what is waiting"
+    assert raes[0]["inbound"] is True
+    assert not raes[-1]["inbound"]
+    assert console.transcript(spender) == []
+
+
+def test_the_log_is_a_single_sequence(db: str, household: tuple[int, int]) -> None:
+    """Both lines are slices of one list, so `seq` is strictly increasing across
+    the whole conversation and a renderer cannot reorder it by accident."""
+    sponsor, spender = household
+    purchase.buy(person_id=spender, **SOAP, db_path=db, client=WardenStub([parked()]))
+    console = console_for(db, warden=WardenStub([]))
+    console.say(store.get_person(sponsor, db_path=db), "what is waiting")
+
+    seqs = [row["seq"] for row in console.log]
+
+    assert seqs == sorted(seqs) == list(range(len(seqs)))
+
+
+def test_the_spenders_page_carries_no_approval_panel(
+    db: str, household: tuple[int, int]
+) -> None:
+    """It briefly did. The script fills `#pending` by id, and the spender's page
+    was rendering an empty container of that name — so the client drew the
+    sponsor's queue onto it, with buttons that posted as the sponsor. Rae's
+    decisions on Ana's screen is the opposite of what this product claims."""
+    _, spender = household
+    purchase.buy(person_id=spender, **SOAP, db_path=db, client=WardenStub([parked()]))
+    client = TestClient(build_console_app(console_for(db, warden=WardenStub([]))))
+
+    def dom(path: str) -> str:
+        """The page without its script. `drawPending` carries the button markup
+        in a template literal, which never runs when the container is absent —
+        so the question is what the document contains, not what the source
+        mentions."""
+        body = client.get(path).text
+        return re.sub(r"<script>.*?</script>", "", body, flags=re.DOTALL)
+
+    ana, rae = dom("/spender"), dom("/sponsor")
+
+    assert 'id="pending"' not in ana
+    assert "Approve" not in ana
+    assert "hand soap" not in ana
+    assert 'id="pending"' in rae
+    assert "Approve" in rae
