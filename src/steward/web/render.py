@@ -118,13 +118,25 @@ def card(title: str, body_html: str, *, note_text: str = "", span: bool = False)
 
 
 def rows(headers: Sequence[str], cells_html: Iterable[Sequence[str]]) -> str:
-    """A table whose cells are already markup, so a panel can put a badge in one."""
+    """A table whose cells are already markup, so a panel can put a badge in one.
+
+    Every table gets its own horizontal scroll box, and that is why this is the
+    right place for it rather than each panel. A five-column ledger does not fit
+    a phone; without the box the overflow is taken by the document, so the whole
+    dashboard slides sideways because one table on it was too wide.
+
+    `tabindex="0"` because a scroll container that only a pointer can scroll is
+    unreachable by keyboard — the columns past the edge would exist for mouse
+    users only. It costs a tab stop on a wide screen where nothing overflows,
+    which is the cheaper of the two failures.
+    """
     head_html = "".join(f"<th>{text(header)}</th>" for header in headers)
     body_html = ""
     for row_html in cells_html:
         row_cells_html = "".join(f"<td>{cell_html}</td>" for cell_html in row_html)
         body_html += f"<tr>{row_cells_html}</tr>"
-    return f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+    table_html = f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+    return f'<div class="scroll-x" tabindex="0">{table_html}</div>'
 
 
 def deck(*panels_html: str) -> str:

@@ -781,3 +781,14 @@ def test_an_unreadable_date_is_shown_rather_than_invented() -> None:
 def test_an_unknown_status_gets_the_unknown_tone() -> None:
     assert render.tone_of("pending") == "wait"
     assert render.tone_of("something new") == render.UNRECOGNISED
+
+
+def test_every_table_is_inside_its_own_scroll_box(client: TestClient) -> None:
+    """A five-column ledger does not fit a phone, and an uncontained table takes
+    the whole document sideways with it. Counted rather than spot-checked,
+    because the guarantee is that *no* panel can emit a bare one — which is why
+    the box is built in render.rows() and not written per panel."""
+    body = "".join(client.get(path).text for path in ("/", "/privacy", "/ledger", "/pilot"))
+
+    assert body.count("<table>") >= 1
+    assert body.count("<table>") == body.count('<div class="scroll-x" tabindex="0"><table>')

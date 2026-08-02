@@ -158,6 +158,10 @@ summary:focus-visible,
 .empty { margin: 0; color: var(--ink-faint); font-size: .9375rem; }
 
 /* --- tables ------------------------------------------------------------- */
+/* The scroll box is per-table, from render.rows(). Contained here, the widest
+   ledger costs one sideways scroll inside its own card; uncontained, it was the
+   whole document that moved. */
+.scroll-x { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .9375rem; }
 th {
   text-align: left; font-size: .75rem; font-weight: 600; letter-spacing: .06em;
