@@ -94,7 +94,7 @@ def check_env(live_release: bool) -> None:
         )
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--release",
@@ -102,13 +102,17 @@ def main() -> int:
         help="let the sponsor approve, which mints a real Prava session",
     )
     parser.add_argument("--linq", action="store_true", help="send messages to real phones")
-    parser.add_argument("--keep", action="store_true", help="keep the demo database")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep the demo database, and print how to point the dashboard at it",
+    )
+    return parser
+
+
+def main(args: argparse.Namespace, workdir: Path) -> int:
     check_env(args.release)
 
-    # A throwaway household each run, so the demo is the same story every time
-    # and never accumulates state that makes the second run different.
-    workdir = Path(tempfile.mkdtemp(prefix="steward-demo-"))
     policy = workdir / "household.yaml"
     policy.write_text(POLICY)
     os.environ["STEWARD_DB"] = str(workdir / "demo.sqlite3")
@@ -231,16 +235,36 @@ def show(handled, store) -> None:
 
 
 def run() -> int:
-    workdir: Path | None = None
-    keep = "--keep" in sys.argv
+    """Own the working directory here, so `--keep` has something to name and
+    cleanup removes only what this run created.
+
+    Both halves used to be wrong. `run` declared a `workdir` that `main` never
+    assigned — it made its own — so the `--keep` branch was unreachable and
+    printed nothing. And cleanup globbed *every* `steward-demo-*` in the temp
+    directory, which deleted the database a previous `--keep` run had been
+    asked to preserve, and would have taken a concurrent run's with it.
+
+    The root cause of the second was reading `--keep` off sys.argv by hand
+    before argparse had a say, so the flag was parsed twice and neither parse
+    owned the directory. It is parsed once now.
+    """
+    args = build_parser().parse_args()
+    # A throwaway household each run, so the demo is the same story every time
+    # and never accumulates state that makes the second run different.
+    workdir = Path(tempfile.mkdtemp(prefix="steward-demo-"))
     try:
-        return main()
+        return main(args, workdir)
     finally:
-        if not keep:
-            for path in Path(tempfile.gettempdir()).glob("steward-demo-*"):
-                shutil.rmtree(path, ignore_errors=True)
-        elif workdir:
-            say(f"{DIM}kept: {workdir}{RESET}")
+        if args.keep:
+            database = workdir / "demo.sqlite3"
+            say(f"\n{DIM}kept: {workdir}{RESET}")
+            say(f"{DIM}Rae is the first row this run wrote, so she is person 1:{RESET}")
+            say(
+                f"  STEWARD_DB={database} PAY_WARDEN_POLICY={workdir / 'household.yaml'}"
+                f" uv run python -m steward serve --person 1"
+            )
+        else:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

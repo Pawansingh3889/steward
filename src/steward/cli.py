@@ -823,6 +823,40 @@ def cmd_approvals_decline(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- the dashboard -----------------------------------------------------------
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    # Imported here so every other subcommand neither pays for starlette and
+    # uvicorn on startup nor fails without them.
+    import uvicorn
+
+    from .web import build_app, scope
+
+    try:
+        house = scope.resolve(int(args.person), db_path=args.db)
+        port = int(args.port) or config.web_port()
+    except (scope.ScopeError, config.ConfigError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    sponsor = house.sponsor()
+    _out(f"\n{BOLD}steward — {sponsor['name']}'s household{RESET}          {DIM}read only{RESET}\n")
+    # The database is named because `main` has already called `init_db` on it by
+    # the time this runs, which migrates whatever it was pointed at. Preventing
+    # that would be worse — a process that refuses to migrate then fails every
+    # query on a stale schema — but the operator should know which file moved.
+    _out(f"  {DIM}database{RESET}   {args.db or config.db_path()}")
+    _out(f"  {DIM}address{RESET}    http://127.0.0.1:{port}")
+    _out(f"  {DIM}scope{RESET}      person {args.person}; no URL here reaches another household")
+    _out(f"  {DIM}ledger{RESET}     /ledger spawns pay-warden — nothing else does")
+    _out(f"\n  {DIM}nothing here writes. approving is still:{RESET}")
+    _out(f"  {DIM}steward approvals approve --id N{RESET}\n")
+
+    # 127.0.0.1, not 0.0.0.0, and not a setting. See config.web_port.
+    uvicorn.run(build_app(house), host="127.0.0.1", port=port, log_level="warning")
+    return 0
+
+
 # --- ask ---------------------------------------------------------------------
 
 
@@ -1086,6 +1120,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_person_flags(declining)
     declining.add_argument("--id", type=int, required=True, help="escalation id")
     declining.set_defaults(func=cmd_approvals_decline)
+
+    serving = sub.add_parser("serve", help="a read-only dashboard for one sponsor")
+    # Deliberately not _add_person_flags: that resolver falls back to "the only
+    # person in the database", which is right for a one-shot command and wrong
+    # for a process that stays up — it would bind a server to whoever is row 1.
+    serving.add_argument(
+        "--person",
+        type=int,
+        required=True,
+        help="the sponsor whose household this serves; nothing else is reachable",
+    )
+    serving.add_argument("--port", type=int, default=0, help="override $STEWARD_WEB_PORT")
+    serving.set_defaults(func=cmd_serve)
 
     asking = sub.add_parser("ask", help="ask the agent something")
     _add_person_flags(asking)

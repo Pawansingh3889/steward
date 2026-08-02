@@ -15,7 +15,7 @@ unless the spender chooses to share a turn.
 
 ## Status
 
-**All 8 phases built.** 468 tests + 6 opt-in, ruff clean.
+**All 8 phases built.** 535 tests + 19 opt-in, ruff clean.
 
 ```
 $ steward evaluate
@@ -126,6 +126,46 @@ and `steward memory forget` read and write memory directly and work with
 agent nicely, deletion would be a request rather than a guarantee — and this
 product is asking someone to hand over their errands, their schedule and their
 moods on the strength of that guarantee.
+
+## A sponsor's dashboard, whose subject is what it will not show
+
+```bash
+make seed                 # a household to look at, offline and instant
+make serve PERSON=1       # http://127.0.0.1:8787
+```
+
+The boundary above is the product, and in a terminal it is invisible: a command
+nobody can run leaves nothing on screen. So there is one read-only page per
+sponsor, and the panel it is built around draws the absence — the conversation
+withheld on one side, and beside it the turns the spender chose to share.
+
+**It has no login, and that is safe for two structural reasons rather than one
+convenient one.** Nothing on it writes: approving is still `steward approvals
+approve --id N`, because a release button on an unauthenticated page would make
+the policy engine's escalation a formality. And the household is bound at
+process start, so no route takes a person id — there is no authorisation check
+to delete, because no handler is ever given anything to check. Editing the URL
+reaches a 404 that says so. `serve --person` refuses a *spender*, which is the
+one way the scope can be wrong while still looking right.
+
+`store.shared_turns()` is the only turn reader the whole package may call — not
+a filter over a wider read, a different function — and a test walks the syntax
+tree of every file in `web/` to prove none of the others appear. The panel also
+never says *how much* it is withholding: "14 messages you cannot see" is itself
+conversation metadata, and volume and timing are most of what a message log
+tells you about somebody.
+
+`/ledger` reads pay-warden's own audit database live, one spender at a time,
+because that database is shared by every agent it has ever answered for. It is
+the only route that spawns a process, it degrades to a panel carrying the real
+error when pay-warden is unreachable, and it renders no payment link: the link
+goes to the spender, not to the sponsor who approved it, so showing it here
+would contradict the thing the page exists to demonstrate.
+
+Rendered from Python with `html.escape` and no template engine. A test walks
+every f-string in `web/` that contains a `<` and fails on any interpolation
+that did not go through an escaper — the naming convention `*_html` is what
+makes "this is markup, not data" checkable rather than remembered.
 
 ## Nothing a model guessed becomes a belief on its own
 
@@ -440,6 +480,12 @@ src/steward/
     privacy.py     pseudonyms + denylist, rebuilt per run
     tools.py       what the agent can do, scoped to one person
     loop.py        one question in, one audited answer out
+  web/
+    scope.py       one household, bound before the server listens
+    panels.py      every read the dashboard makes, in one file
+    render.py      the only exit from data into markup
+    style.py       the design system; no webfont, for the obvious reason
+    app.py         four routes, none of which names a person
 ```
 
 `store.py` owns all SQL. `agent/` never imports sqlite3 and never opens a socket
@@ -465,6 +511,17 @@ terminal; `--linq` sends them to real handsets.
 *allows* a purchase, and the sandbox has a finite number of those — so the demo
 policy parks every purchase for the sponsor, which costs nothing and is the
 interesting path anyway. `--release` goes further and mints one real session.
+
+`--keep` holds on to the database it built and prints the command that points
+the dashboard at it, so the page can be read against a run a real model and a
+real policy engine actually produced rather than against a fixture:
+
+```bash
+uv run python scripts/demo.py --keep
+STEWARD_DB=/tmp/steward-demo-XXXX/demo.sqlite3 \
+  PAY_WARDEN_POLICY=/tmp/steward-demo-XXXX/household.yaml \
+  uv run python -m steward serve --person 1
+```
 
 ## Development
 
