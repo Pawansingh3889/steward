@@ -88,15 +88,25 @@ def search(
 
 
 def forget(
-    kind: str, item_id: int, *, person_id: int | None = None, db_path: str | None = None
+    kind: str,
+    item_id: int,
+    *,
+    person_id: int | None = None,
+    run_id: int = 0,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
-    """Delete one remembered thing, whoever asked.
+    """Delete one remembered thing, whoever asked, and record that they did.
 
     `person_id` is the scope check. It is optional only because the CLI runs as
     the person themselves and has already established who that is; every caller
     that takes the id from somewhere less trustworthy — the model, an HTTP
     request — must pass it, and a guessed id then fails instead of deleting a
     stranger's memory.
+
+    The correction row is the point. "This system held something wrong about me
+    and I fixed it" is the phenomenon a pilot is trying to observe, and a
+    tombstone alone cannot distinguish it from a fact that was simply
+    superseded by a newer one.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown memory kind {kind!r}; use one of: {', '.join(KINDS)}")
@@ -113,5 +123,18 @@ def forget(
     if row is None or (person_id is not None and int(row["person_id"]) != person_id):
         raise store.NotFoundError(f"no {kind} {item_id} belonging to you")
 
+    # Read before the delete: a pending fact is a machine's guess being turned
+    # down, a live one is a belief being corrected, and afterwards they look the
+    # same.
+    was_proposal = kind == FACT and bool(row.get("pending"))
     remove(item_id, db_path=db_path)
+    store.insert_correction(
+        person_id=int(row["person_id"]),
+        kind=store.REJECTED_PROPOSAL if was_proposal else store.DELETED_BELIEF,
+        subject=kind,
+        subject_id=item_id,
+        detail=label,
+        run_id=run_id,
+        db_path=db_path,
+    )
     return {"kind": kind, "id": item_id, "forgotten": True, "was": label}

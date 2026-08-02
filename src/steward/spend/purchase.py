@@ -68,6 +68,7 @@ def buy(
     merchant_name: str,
     merchant_url: str,
     merchant_country: str = "GB",
+    run_id: int = 0,
     db_path: str | None = None,
     client: Warden | None = None,
 ) -> dict[str, Any]:
@@ -121,6 +122,7 @@ def buy(
             currency=currency,
             rule_id=decision.rule_id,
             reason=decision.reason,
+            run_id=run_id,
             db_path=db_path,
         )
         outcome["sponsor_id"] = int(sponsor["id"])

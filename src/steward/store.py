@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS turns (
   -- 0: the sponsor sees decisions, ledger and escalations, never the chat,
   -- unless the spender opts a turn in.
   shared_with_sponsor INTEGER NOT NULL DEFAULT 0,
+  -- The agent run this turn belongs to. Without it, joining "what they said" to
+  -- "what was decided" is a guess about timestamps, and the pilot's entire
+  -- question is which message led to which decision. 0 for turns with no run
+  -- behind them — a deterministic router reply, for one.
+  run_id INTEGER NOT NULL DEFAULT 0,
   ts TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS episodes (
@@ -120,6 +125,8 @@ CREATE TABLE IF NOT EXISTS escalations (
   reason TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
   payment_url TEXT NOT NULL DEFAULT '',
+  -- The run that caused it, so a decision joins back to the conversation.
+  run_id INTEGER NOT NULL DEFAULT 0,
   created_ts TEXT NOT NULL,
   decided_ts TEXT NOT NULL DEFAULT ''
 );
@@ -175,6 +182,21 @@ CREATE TABLE IF NOT EXISTS refunds (
   created_ts TEXT NOT NULL,
   resolved_ts TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS corrections (
+  id INTEGER PRIMARY KEY,
+  person_id INTEGER NOT NULL REFERENCES people(id),
+  -- What the person was telling us: 'deleted_belief' (we held something wrong),
+  -- 'rejected_proposal' (a model guessed and they said no). Recorded as its own
+  -- row rather than inferred later from a tombstone, because "they corrected
+  -- us" and "it expired" look identical in a deleted_ts and mean opposite
+  -- things about whether this system is working.
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  detail TEXT NOT NULL DEFAULT '',
+  run_id INTEGER NOT NULL DEFAULT 0,
+  created_ts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY,
   person_id INTEGER NOT NULL DEFAULT 0,
@@ -216,6 +238,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_attempt ON escalations(attempt
 CREATE INDEX IF NOT EXISTS idx_plans_person ON plans(person_id, status);
 CREATE INDEX IF NOT EXISTS idx_plan_items_plan ON plan_items(plan_id);
 CREATE INDEX IF NOT EXISTS idx_refunds_person ON refunds(person_id, status);
+CREATE INDEX IF NOT EXISTS idx_corrections_person ON corrections(person_id, created_ts);
+CREATE INDEX IF NOT EXISTS idx_turns_run ON turns(run_id);
+CREATE INDEX IF NOT EXISTS idx_escalations_run ON escalations(run_id);
 """
 
 _initialized: set[str] = set()
@@ -253,6 +278,8 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("people", "home_lat", "REAL"),
     ("people", "home_lon", "REAL"),
     ("people", "share_mode", "TEXT NOT NULL DEFAULT 'private'"),
+    ("turns", "run_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("escalations", "run_id", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Indexes this version replaced. Dropped by name before the new ones are
@@ -582,13 +609,14 @@ def insert_turn(
     speaker: str,
     text: str,
     shared_with_sponsor: bool = False,
+    run_id: int = 0,
     db_path: str | None = None,
 ) -> int:
     with transaction(db_path) as conn:
         cur = conn.execute(
-            "INSERT INTO turns (person_id, speaker, text, shared_with_sponsor, ts)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (person_id, speaker, text, int(shared_with_sponsor), utc_now_iso()),
+            "INSERT INTO turns (person_id, speaker, text, shared_with_sponsor, run_id, ts)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (person_id, speaker, text, int(shared_with_sponsor), run_id, utc_now_iso()),
         )
         assert cur.lastrowid is not None
         return int(cur.lastrowid)
@@ -634,13 +662,14 @@ def insert_escalation(
     merchant_name: str = "",
     rule_id: str = "",
     reason: str = "",
+    run_id: int = 0,
     db_path: str | None = None,
 ) -> int:
     with transaction(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO escalations (spender_id, sponsor_id, attempt_id, description,"
-            " merchant_name, amount_cents, currency, rule_id, reason, created_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " merchant_name, amount_cents, currency, rule_id, reason, run_id, created_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 spender_id,
                 sponsor_id,
@@ -651,6 +680,7 @@ def insert_escalation(
                 currency,
                 rule_id,
                 reason,
+                run_id,
                 utc_now_iso(),
             ),
         )
@@ -985,6 +1015,48 @@ def resolve_refund(
         )
         if cur.rowcount == 0:
             raise NotFoundError(f"no open refund {refund_id} of yours to resolve")
+
+
+# --- corrections ---------------------------------------------------------------
+
+DELETED_BELIEF = "deleted_belief"
+REJECTED_PROPOSAL = "rejected_proposal"
+CORRECTION_KINDS = (DELETED_BELIEF, REJECTED_PROPOSAL)
+
+
+def insert_correction(
+    *,
+    person_id: int,
+    kind: str,
+    subject: str,
+    subject_id: int = 0,
+    detail: str = "",
+    run_id: int = 0,
+    db_path: str | None = None,
+) -> int:
+    """Record that a person told us we had something wrong.
+
+    Its own row rather than something inferred later from a tombstone: "they
+    corrected us" and "it was superseded" both leave a deleted_ts, and they mean
+    opposite things about whether this system is working.
+    """
+    if kind not in CORRECTION_KINDS:
+        raise StoreError(f"unknown correction kind {kind!r}")
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO corrections (person_id, kind, subject, subject_id, detail, run_id,"
+            " created_ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (person_id, kind, subject, subject_id, detail, run_id, utc_now_iso()),
+        )
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+
+def list_corrections(person_id: int, db_path: str | None = None) -> list[dict[str, Any]]:
+    with transaction(db_path) as conn:
+        return _rows(
+            conn.execute("SELECT * FROM corrections WHERE person_id = ? ORDER BY id", (person_id,))
+        )
 
 
 # --- agent audit -------------------------------------------------------------

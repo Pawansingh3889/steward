@@ -89,22 +89,35 @@ Present, per request:
 | outcome | `escalations.status` + `decided_ts` |
 | agent reasoning trail | `agent_runs` (question, answer, tools_used, tokens, latency) |
 
-Missing, and small to add:
+### All three gaps are now closed
 
-- **Pair ID.** People have ids and a `sponsor_id`, so a pair is derivable, but
-  no event carries one directly. Analysis will need it.
-- **Thread/session join.** `agent_runs.id` exists per run, but turns and
-  escalations do not carry it, so joining a message to the decision it caused is
-  currently a timestamp guess. This is the one that will actually hurt.
-- **A correction event.** The pilot's whole subject is whether people can
-  correct the system, and correction is currently only *implicit* — a
-  `forget_fact`, a `memory confirm`, a declined escalation, a re-adjusted plan.
-  There is no single event kind meaning "the person told us we had it wrong",
-  so the primary phenomenon would have to be reconstructed from four tables.
+They were flagged as cheap now and unrecoverable later, so they were done rather
+than scheduled. See `src/steward/pilot.py` and `tests/test_pilot_export.py`.
 
-**Recommendation: add the join key and the correction event before recruiting.**
-Both are cheap now and unrecoverable later — a pilot that ends without them
-leaves you unable to answer the question it was run to answer.
+- **Pair ID.** `pilot.pair_id()` gives a stable `pair_<sponsor>_<spender>`, and
+  every exported row carries it.
+- **Thread/session join.** `turns.run_id` and `escalations.run_id` now exist, so
+  a message joins to the decision it caused. The agent run row is opened
+  *before* the turn is written, which is what makes the id available to point
+  at. A turn with no run behind it — a deterministic router reply — carries 0
+  rather than a borrowed id, so an unrelated decision can never look like its
+  consequence.
+- **A correction event.** A `corrections` table, written where a correction
+  actually happens rather than reconstructed afterwards. It distinguishes
+  `deleted_belief` (we held something wrong) from `rejected_proposal` (a model
+  guessed and they said no), and **a superseded fact is not counted** — restating
+  something tombstones the old row, and treating that as a correction would
+  inflate the pilot's headline number with ordinary use.
+
+`pilot.events()` returns the joined stream in time order and `pilot.summary()`
+the weekly counts. Two properties are tested rather than intended: **no name,
+phone number or email appears in any exported row**, and **message text is
+excluded unless asked for** — an analysis file that carried somebody's private
+messages is a different object from one that carries counts. `include_text=True`
+exists for a participant exercising their right to see what is held.
+
+Verified against a database created before these columns existed: columns added,
+`corrections` created, rows preserved, export working.
 
 ---
 

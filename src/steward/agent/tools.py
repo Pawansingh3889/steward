@@ -396,6 +396,7 @@ class ToolBox:
                 merchant_name=merchant_name,
                 merchant_url=merchant_url,
                 merchant_country=merchant_country,
+                run_id=self.run_id,
                 db_path=self.db_path,
                 client=self.warden,
             )
@@ -498,7 +499,13 @@ class ToolBox:
         # and deletes another person's memory.
         if row is None or int(row["person_id"]) != self.person_id:
             return {"error": f"no fact {fact_id} belonging to you"}
-        store.delete_fact(int(fact_id), db_path=self.db_path)
+        recall.forget(
+            recall.FACT,
+            int(fact_id),
+            person_id=self.person_id,
+            run_id=self.run_id,
+            db_path=self.db_path,
+        )
         self.writes_log.append(
             {"action": "forget", "kind": str(row["kind"]), "key": str(row["key"])}
         )

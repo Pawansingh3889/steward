@@ -122,6 +122,17 @@ def run(
     # it. Redaction happens on the way to the model, not on the way to disk:
     # this is their machine and their words, and a memory that reads back
     # [redacted] protects nothing from anyone who can already open the file.
+    # The run row opens first — before the turn, before the model — so that
+    # everything written afterwards can point at it. That ordering is what makes
+    # "which message caused this decision" answerable rather than inferred from
+    # timestamps.
+    run_id = store.insert_agent_run(
+        person_id=person_id,
+        trigger_kind=trigger,
+        question=safe_question,
+        model=model,
+        db_path=db_path,
+    )
     turn_id = None
     # Whether this turn is visible to the sponsor is the spender's standing
     # choice, read at the moment the turn is written. Deciding it later, at read
@@ -135,16 +146,10 @@ def run(
             speaker=Speaker.PERSON,
             text=question,
             shared_with_sponsor=shared,
+            run_id=run_id,
             db_path=db_path,
         )
         episodic.remember(person_id=person_id, text=question, turn_id=turn_id, db_path=db_path)
-    run_id = store.insert_agent_run(
-        person_id=person_id,
-        trigger_kind=trigger,
-        question=safe_question,
-        model=model,
-        db_path=db_path,
-    )
     box = ToolBox(
         person_id=person_id, redactor=redactor, db_path=db_path, run_id=run_id, warden=warden
     )
@@ -205,6 +210,7 @@ def run(
             speaker=Speaker.STEWARD,
             text=safe_answer,
             shared_with_sponsor=shared,
+            run_id=run_id,
             db_path=db_path,
         )
     return {
