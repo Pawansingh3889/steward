@@ -201,6 +201,18 @@ def run(
             latency_ms=int((time.monotonic() - started) * 1000),
             db_path=db_path,
         )
+    # The model's own view of the run: system prompt, the redacted question,
+    # every tool call and result, and what it said back. Deliberately the
+    # *sent* messages rather than the person's words — `turns` already holds
+    # those, unredacted, because it is their machine. This holds what the model
+    # was given, which is the only record that can answer "why did it decide
+    # that" and is already pseudonymised by the time it gets here.
+    #
+    # Behind `record` with everything else: a caller that asked not to be
+    # remembered did not mean "except the transcript".
+    if record:
+        store.insert_agent_transcript(run_id, json.dumps(messages), db_path=db_path)
+
     # Logged after the run succeeds, and as a turn only — never an episode. See
     # models.Speaker: an agent that embeds its own output starts recalling its
     # own guesses as though the person had said them.

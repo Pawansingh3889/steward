@@ -210,11 +210,16 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   latency_ms INTEGER NOT NULL DEFAULT 0,
   ts TEXT NOT NULL
 );
+-- What the model was actually sent, which is not what the person actually said.
+-- `turns` holds their words; this holds the redacted view the model saw, with
+-- other people as pseudonyms. Keeping both is the only way to answer "why did
+-- it decide that" without keeping a second copy of anybody's raw conversation.
 CREATE TABLE IF NOT EXISTS agent_transcripts (
   id INTEGER PRIMARY KEY,
   run_id INTEGER NOT NULL REFERENCES agent_runs(id),
   messages TEXT NOT NULL,
-  ts TEXT NOT NULL
+  ts TEXT NOT NULL,
+  deleted_ts TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -280,6 +285,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("people", "share_mode", "TEXT NOT NULL DEFAULT 'private'"),
     ("turns", "run_id", "INTEGER NOT NULL DEFAULT 0"),
     ("escalations", "run_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("agent_transcripts", "deleted_ts", "TEXT NOT NULL DEFAULT ''"),
 )
 
 # Indexes this version replaced. Dropped by name before the new ones are
@@ -635,6 +641,11 @@ def recent_turns(
             )
         )
     return list(reversed(rows))
+
+
+def get_turn(turn_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    with transaction(db_path) as conn:
+        return _row(conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)))
 
 
 def shared_turns(person_id: int, db_path: str | None = None) -> list[dict[str, Any]]:
@@ -1110,6 +1121,57 @@ def get_agent_run(run_id: int, db_path: str | None = None) -> dict[str, Any] | N
 def recent_agent_runs(*, limit: int = 20, db_path: str | None = None) -> list[dict[str, Any]]:
     with transaction(db_path) as conn:
         return _rows(conn.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT ?", (limit,)))
+
+
+def get_agent_transcript(run_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    """What the model saw on one run, unless it has been forgotten.
+
+    Tombstoned rows are absent rather than marked, because every other reader in
+    this module treats a tombstone as gone and one that did not would be the
+    exception nobody remembers.
+    """
+    with transaction(db_path) as conn:
+        return _row(
+            conn.execute(
+                "SELECT * FROM agent_transcripts WHERE run_id = ? AND deleted_ts = ''"
+                " ORDER BY id DESC LIMIT 1",
+                (run_id,),
+            )
+        )
+
+
+def list_agent_transcripts(
+    person_id: int, *, limit: int = 20, db_path: str | None = None
+) -> list[dict[str, Any]]:
+    """One person's transcripts, newest first.
+
+    Joined through agent_runs because a transcript knows its run and a run knows
+    its person; storing the person on both would be two places to get it wrong.
+    """
+    with transaction(db_path) as conn:
+        return _rows(
+            conn.execute(
+                "SELECT t.* FROM agent_transcripts t JOIN agent_runs r ON r.id = t.run_id"
+                " WHERE r.person_id = ? AND t.deleted_ts = '' ORDER BY t.id DESC LIMIT ?",
+                (person_id, limit),
+            )
+        )
+
+
+def delete_agent_transcripts_for_run(run_id: int, db_path: str | None = None) -> int:
+    """Tombstone whatever the model saw on this run.
+
+    Called when the person forgets the thing that caused the run. Without it,
+    "forget that" would leave the sentence sitting in a transcript — deleted
+    from memory, still on disk, and still readable by anything that reads
+    transcripts. A deletion that only reaches some of the copies is not one.
+    """
+    with transaction(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE agent_transcripts SET deleted_ts = ? WHERE run_id = ? AND deleted_ts = ''",
+            (utc_now_iso(), run_id),
+        )
+        return int(cur.rowcount)
 
 
 def insert_agent_transcript(run_id: int, messages: str, db_path: str | None = None) -> int:

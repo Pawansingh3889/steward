@@ -219,3 +219,32 @@ def test_finishing_a_run_that_does_not_exist_raises(db: str) -> None:
         store.finish_agent_run(
             404, answer="", tools_used="", tokens_in=0, tokens_out=0, latency_ms=0, db_path=db
         )
+
+
+def test_an_older_database_gains_the_transcript_tombstone(tmp_path) -> None:
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+    so a deployed volume would keep a transcripts table with no deleted_ts and
+    fail on the first read that names it."""
+    import sqlite3
+
+    db_path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE agent_transcripts (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL,"
+        " messages TEXT NOT NULL, ts TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO agent_transcripts (run_id, messages, ts)"
+        " VALUES (1, '[]', '2026-07-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store.init_db(str(db_path))
+
+    columns = {row[1] for row in sqlite3.connect(db_path).execute(
+        "PRAGMA table_info(agent_transcripts)"
+    )}
+    assert "deleted_ts" in columns
+    # And the row that predates the column is live, not accidentally tombstoned.
+    assert store.get_agent_transcript(1, db_path=str(db_path)) is not None
