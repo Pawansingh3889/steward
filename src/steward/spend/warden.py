@@ -301,6 +301,14 @@ def _unwrap(result: Any) -> Any:
     `structuredContent` is preferred when present — a newer server sends the
     object directly and re-parsing the text copy would be a second chance to
     get it wrong.
+
+    **Blocks are decoded one at a time**, because FastMCP emits one per item of
+    a returned list. Joining them first and parsing once worked only for a tool
+    that returns a single object: a two-row audit log came out as `{…}{…}`,
+    which is not JSON, and a one-row log came out as a bare dict that its
+    caller then dropped for not being a list. Both failure modes were silent in
+    different directions, and between them `get_audit_log` had never once
+    returned a row.
     """
     if getattr(result, "isError", False):
         raise WardenError(f"pay-warden reported an error: {_text(result)[:300]}")
@@ -308,13 +316,22 @@ def _unwrap(result: Any) -> Any:
     if isinstance(structured, dict):
         # FastMCP wraps a non-object return in {"result": ...}.
         return structured.get("result", structured)
-    text = _text(result)
-    if not text:
+    blocks = [
+        text
+        for block in (getattr(result, "content", None) or [])
+        if (text := getattr(block, "text", ""))
+    ]
+    if not blocks:
         raise EmptyResponse("pay-warden returned an empty response")
-    try:
-        return json.loads(text)
-    except ValueError as exc:
-        raise WardenError(f"pay-warden returned unparseable content: {text[:200]}") from exc
+    decoded = []
+    for text in blocks:
+        try:
+            decoded.append(json.loads(text))
+        except ValueError as exc:
+            raise WardenError(f"pay-warden returned unparseable content: {text[:200]}") from exc
+    # One block stays a bare value, so every existing caller is unaffected. Only
+    # a caller that knows it asked for a list can tell one row from one object.
+    return decoded[0] if len(decoded) == 1 else decoded
 
 
 def _text(result: Any) -> str:
@@ -446,4 +463,9 @@ def audit_log(*, person_id: int | None = None, limit: int = 20, warden: Warden |
         # here and nowhere else: this is the only call that asks for a list, and
         # so the only one that can read silence as "none". See EmptyResponse.
         return []
+    if isinstance(result, dict):
+        # A one-row log arrives as a single content block, which is the same
+        # shape a dict-returning tool produces. This is the only caller that
+        # knows it asked for a list, so it is the only one that can say which.
+        return [result]
     return result if isinstance(result, list) else []

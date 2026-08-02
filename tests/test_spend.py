@@ -623,3 +623,62 @@ def test_an_error_from_reading_a_reply_survives_anyios_task_group() -> None:
 
     assert _warden_error_in(wrapped) is inner
     assert _warden_error_in(ExceptionGroup("no wardens here", [ValueError("x")])) is None
+
+
+class _Block:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _Blocks:
+    """FastMCP's shape for a returned list: one content block per item."""
+
+    isError = False
+    structuredContent = None
+
+    def __init__(self, *texts: str) -> None:
+        self.content = [_Block(text) for text in texts]
+
+
+def test_a_multi_row_audit_log_is_read_as_rows() -> None:
+    """Blocks are decoded one at a time.
+
+    Joining them and parsing once produced `{...}{...}`, which is not JSON, so
+    any log with two or more rows came back as "unparseable content".
+    """
+    from steward.spend.warden import _unwrap
+
+    class Two:
+        def call(self, tool: str, arguments: dict) -> object:
+            return _unwrap(_Blocks('{"verdict": "denied"}', '{"verdict": "allowed"}'))
+
+    rows = warden.audit_log(person_id=2, warden=Two())
+
+    assert [row["verdict"] for row in rows] == ["denied", "allowed"]
+
+
+def test_a_single_row_audit_log_is_still_a_list() -> None:
+    """One row arrives as one block, which is the same shape a dict-returning
+    tool produces — so it decoded to a bare dict and the old `isinstance(...,
+    list)` guard silently dropped it. Between this and the multi-row bug,
+    get_audit_log had never once returned a row."""
+    from steward.spend.warden import _unwrap
+
+    class One:
+        def call(self, tool: str, arguments: dict) -> object:
+            return _unwrap(_Blocks('{"verdict": "needs_approval", "total_amount": "25"}'))
+
+    rows = warden.audit_log(person_id=2, warden=One())
+
+    assert len(rows) == 1
+    assert rows[0]["total_amount"] == "25"
+
+
+def test_a_single_object_reply_is_unchanged_for_a_purchase() -> None:
+    """The one-block case must stay a bare value, or every other caller breaks."""
+    from steward.spend.warden import _unwrap
+
+    payload = _unwrap(_Blocks('{"verdict": "allowed", "rule_id": "r", "reason": "why"}'))
+
+    assert isinstance(payload, dict)
+    assert payload["verdict"] == "allowed"
