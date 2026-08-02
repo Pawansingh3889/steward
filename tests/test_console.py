@@ -389,3 +389,26 @@ def test_the_code_survives_the_clients_redraw(db: str, household: tuple[int, int
     row = console.transcript(spender)[0]
 
     assert row["qr"].startswith("data:image/svg+xml")
+
+
+def test_every_redraw_is_guarded_by_a_signature() -> None:
+    """A poll that changes nothing must write nothing.
+
+    `draw` had this from the start; `drawPending` did not, and it is the one
+    holding the only two buttons on the page. Rewriting it every two seconds
+    destroyed them and any focus resting on one, so a keyboard user tabbing to
+    Approve lost it before they could press — an approval path that a mouse
+    could use and a keyboard could not.
+
+    Structural, because this suite has no JS engine. The behaviour itself was
+    checked by running the real function against a stub DOM and counting writes:
+    unchanged polls wrote once before the guard and zero times after.
+    """
+    from steward.web.console import CONSOLE_SCRIPT_HTML
+
+    for name in ("function draw(", "function drawPending("):
+        body = CONSOLE_SCRIPT_HTML[CONSOLE_SCRIPT_HTML.index(name) :]
+        body = body[: body.index("\n}")]
+
+        assert "innerHTML" in body, f"{name} no longer writes; this test is stale"
+        assert "dataset.sig" in body, f"{name} redraws unconditionally"

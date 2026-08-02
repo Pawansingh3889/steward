@@ -230,8 +230,16 @@ function draw(who, rows, force) {
 function drawPending(waiting) {
   const el = document.getElementById("pending");
   if (!el) return;
-  if (!waiting.length) { el.innerHTML = ""; return; }
+  // The same guard draw() uses, and it matters more here: this block holds the
+  // only two buttons on the page. Rewriting it on every poll destroyed them and
+  // whatever focus was sitting on one, so a keyboard user tabbing to Approve
+  // lost it within two seconds, every time, and could never reach the press.
+  // Nothing about the queue changes between polls, so nothing should be redrawn.
   const w = waiting[0];
+  const signature = JSON.stringify(w ?? null);
+  if (el.dataset.sig === signature) return;
+  el.dataset.sig = signature;
+  if (!w) { el.innerHTML = ""; return; }
   el.innerHTML = `<div class="pending">
     <div>${esc(w.description)} <span class="amount">${esc(w.amount)}</span></div>
     <div class="rule">${esc(w.reason)}</div>
