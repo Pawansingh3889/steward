@@ -2,12 +2,19 @@
 
 Every offer this system can make comes from here, and every surface says
 FIXTURE. That is not modesty, it is the honest form of a real finding: canibuy
-probed the open web for agent-readiness and the best merchant on record graded
-**C**, most graded **F**, and none of them sell household essentials.
+probed 23 merchants for agent-readiness, and the only two that graded **B** sell
+clothes. Nothing graded above **C** that a household actually runs out of.
 
-    bluebottlecoffee.com  F     monoprice.com     F
-    adafruit.com          C     bhphotovideo.com  F
-    sparkfun.com          C     sweetwater.com    F
+    probed 2026-08-01          B  2    C  6    D  2    F  13
+
+    allbirds.com          B     walmart.com       C
+    gymshark.com          B     johnlewis.com     C
+    sparkfun.com          C     target.com        F
+    bluebottlecoffee.com  F     argos.co.uk       F
+
+A grade is a probe result on a date, not a property of the merchant. adafruit
+graded **C** in one sweep and **F** in the next a day later, which is the whole
+argument for reading these as evidence rather than as a table of facts.
 
 So the choice is between a demo that quietly pretends the web is ready and one
 that models the catalogue and says so. Phase 7 swaps live price fetching in for
