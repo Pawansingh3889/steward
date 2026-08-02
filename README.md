@@ -259,9 +259,12 @@ Coordinates live in two columns read by one module; what the model is told is
 unknown* rather than guessing — and that answer sorts last, not first.
 
 The catalogue is modelled and labelled `FIXTURE` on every surface. That is the
-honest form of a real finding: canibuy graded the open web for agent-readiness
-and the best merchant scored **C**, most scored **F**, and none sell household
-essentials. Phase 7 swaps live fetching in for any merchant that grades well.
+honest form of a real finding: canibuy probed 23 merchants for agent-readiness
+and the best two scored **B** — allbirds and gymshark, both via a published
+`/.well-known/ucp` manifest, and both selling clothes. The general stores that
+would actually sell soap top out at **C** (Walmart, John Lewis), and more than
+half the corpus scored **F**. Phase 7 swaps live fetching in for any merchant
+that grades well.
 
 ## Two lines, and what crosses between them
 

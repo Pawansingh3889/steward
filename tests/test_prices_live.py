@@ -9,13 +9,19 @@ with this code.
 
 What it is for: canibuy graded merchants for agent-readiness, and the whole
 fixture-catalogue argument rests on those grades. This checks the grades still
-describe reality, from the other direction — a C should be readable and an F
-should not be, and if that ever flips, the argument for a modelled catalogue
-needs revisiting rather than repeating.
+describe reality, from the other direction — a merchant that grades well should
+be readable and one that grades badly should not be, and if that ever flips, the
+argument for a modelled catalogue needs revisiting rather than repeating.
 
-Last run 2026-08-02:
+A grade is a whole-journey verdict and reading a price is one stage of it, so
+the two can move apart. adafruit fell from C to F between two sweeps a day
+apart and still publishes a perfectly readable price: what changed was further
+down the journey, not here. That is worth knowing before treating a grade as a
+proxy for any single capability.
 
-    adafruit.com          C    35.00 USD via json-ld, InStock
+Last run 2026-08-02, all three as expected:
+
+    adafruit.com          F    35.00 USD via json-ld, InStock
     sparkfun.com          C     7.50 USD via json-ld
     bluebottlecoffee.com  F    loads, no structured price → stays modelled
 """
@@ -38,7 +44,9 @@ pytestmark = [
     ),
 ]
 
-# Graded by canibuy. The grade is the prediction; the assertion is the check.
+# Graded by canibuy. The grade is the prediction; the assertion is the check, and
+# when they disagree the check wins — adafruit grades F now and still prices
+# cleanly, because its F is about what happens after the price.
 READABLE = [
     ("adafruit.com", "https://www.adafruit.com/product/3055"),
     ("sparkfun.com", "https://www.sparkfun.com/products/13678"),
