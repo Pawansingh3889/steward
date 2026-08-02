@@ -256,6 +256,21 @@ anyone managing their money. **The Linq adapter is dry-run unless
 integration that went live merely because a token was present is how a test run
 becomes a message to somebody's parent.
 
+**Verified live on 2026-08-02** — one message delivered to a real handset over
+iMessage. What that bought was discovering the adapter written from a documented
+guess was wrong in *every particular*:
+
+```
+guessed   POST /messages   {"to": …, "from": …, "body": …}
+actual    POST /chats/{chat_id}/messages
+                           {"message": {"parts": [{"type": "text", "value": …}]}}
+```
+
+Messages address a **chat**, not a number, and the chat carries the protocol —
+the sandbox conversation negotiated iMessage, so it arrived as a blue bubble.
+Opening a *new* chat is still unverified: `POST /chats` rejects every body shape
+probed against it, so `send` refuses clearly rather than guessing.
+
 ## Letting someone spend
 
 Enrolling a person is not enough — pay-warden denies any agent its policy has

@@ -355,18 +355,35 @@ def test_the_agent_has_no_tool_to_change_sharing(db: str, household) -> None:
 # --- Linq --------------------------------------------------------------------
 
 
+def _linq_transport(chats: list[dict], sent: list[dict]):
+    """A scripted Linq: /chats lists conversations, /chats/{id}/messages posts."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path.endswith("/chats"):
+            return httpx.Response(200, json={"chats": chats})
+        sent.append(_json.loads(request.content.decode()))
+        return httpx.Response(200, json={"id": "msg_1"})
+
+    return httpx.MockTransport(handler)
+
+
+CHAT = {
+    "id": "62b0a41a",
+    "is_group": False,
+    "service": "iMessage",
+    "handles": [{"handle": "+12062710710", "is_me": True}, {"handle": SPENDER_LINE}],
+}
+
+
 def test_linq_is_dry_run_unless_explicitly_turned_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """A text reaches a real person and cannot be recalled. An integration that
     went live because a token happened to be present is how a test run becomes a
     message to somebody's parent."""
-    monkeypatch.setenv("LINQ_FROM_NUMBER", "+447000000001")
-    sent: list[httpx.Request] = []
+    sent: list[dict] = []
+    channel = linq.LinqChannel(http=httpx.Client(transport=_linq_transport([CHAT], sent)))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        return httpx.Response(200, json={"id": "msg_1"})
-
-    channel = linq.LinqChannel(http=httpx.Client(transport=httpx.MockTransport(handler)))
     delivery = channel.send(Outbound(person_id=1, body="hello"), to=SPENDER_LINE)
 
     assert delivery.delivered is False
@@ -374,29 +391,53 @@ def test_linq_is_dry_run_unless_explicitly_turned_on(monkeypatch: pytest.MonkeyP
     assert sent == []
 
 
-def test_linq_sends_when_turned_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LINQ_FROM_NUMBER", "+447000000001")
+def test_linq_sends_the_shape_the_api_actually_wants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verified live: messages are addressed to a chat, and the body is a list
+    of typed parts. The adapter written from a documented guess had every one of
+    these wrong."""
     monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
     sent: list[dict] = []
+    channel = linq.LinqChannel(http=httpx.Client(transport=_linq_transport([CHAT], sent)))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        import json as _json
-
-        sent.append(_json.loads(request.content.decode()))
-        return httpx.Response(200, json={"id": "msg_1"})
-
-    channel = linq.LinqChannel(http=httpx.Client(transport=httpx.MockTransport(handler)))
     delivery = channel.send(Outbound(person_id=1, body="hello"), to=SPENDER_LINE)
 
     assert delivery.delivered is True
-    assert sent == [{"to": SPENDER_LINE, "from": "+447000000001", "body": "hello"}]
+    assert "iMessage" in delivery.detail  # the chat carries the protocol
+    assert sent == [{"message": {"parts": [{"type": "text", "value": "hello"}]}}]
+
+
+def test_no_chat_means_a_clear_refusal_not_a_guess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening a conversation is the one thing this cannot do yet."""
+    monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
+    sent: list[dict] = []
+    channel = linq.LinqChannel(http=httpx.Client(transport=_linq_transport([], sent)))
+
+    delivery = channel.send(Outbound(person_id=1, body="hello"), to=SPENDER_LINE)
+
+    assert delivery.delivered is False
+    assert "opening one is not implemented" in delivery.detail
+    assert sent == []
+
+
+def test_a_group_chat_is_never_used_for_a_personal_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message meant for one person must not land in a room."""
+    monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
+    group = {**CHAT, "is_group": True}
+    sent: list[dict] = []
+    channel = linq.LinqChannel(http=httpx.Client(transport=_linq_transport([group], sent)))
+
+    delivery = channel.send(Outbound(person_id=1, body="hello"), to=SPENDER_LINE)
+
+    assert delivery.delivered is False
+    assert sent == []
 
 
 @pytest.mark.parametrize("value", ["false", "no", "0", ""])
 def test_a_negative_live_value_still_means_dry_run(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    monkeypatch.setenv("LINQ_FROM_NUMBER", "+447000000001")
     monkeypatch.setenv("STEWARD_LINQ_LIVE", value)
 
     delivery = linq.LinqChannel().send(Outbound(person_id=1, body="hi"), to=SPENDER_LINE)
@@ -424,20 +465,21 @@ def test_a_person_with_no_number_is_reported_not_crashed(
 
 
 def test_a_linq_error_is_relayed_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The first live attempt against an unverified endpoint is exactly when a
-    summarised error costs an afternoon."""
-    monkeypatch.setenv("LINQ_FROM_NUMBER", "+447000000001")
+    """Relaying Linq's own words is what turned a wrong adapter into a fixed one
+    in an afternoon rather than a week."""
     monkeypatch.setenv("STEWARD_LINQ_LIVE", "1")
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(422, text="unknown field 'body'")
-    )
 
-    delivery = linq.LinqChannel(http=httpx.Client(transport=transport)).send(
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chats"):
+            return httpx.Response(200, json={"chats": [CHAT]})
+        return httpx.Response(400, text='{"error":{"code":1003,"message":"Invalid request body"}}')
+
+    delivery = linq.LinqChannel(http=httpx.Client(transport=httpx.MockTransport(handler))).send(
         Outbound(person_id=1, body="hi"), to=SPENDER_LINE
     )
 
     assert delivery.delivered is False
-    assert "unknown field 'body'" in delivery.detail
+    assert "Invalid request body" in delivery.detail
 
 
 # --- the CLI -----------------------------------------------------------------
