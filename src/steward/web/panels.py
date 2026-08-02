@@ -13,6 +13,7 @@ in a text message is reading one implementation.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -450,6 +451,26 @@ def ledger(house: Household, *, client: Warden | None = None) -> str:
     return blocks_html
 
 
+def _what_was_bought(entry: dict[str, Any]) -> str:
+    """pay-warden records the line items, not a description.
+
+    Its audit row carries `products` as a JSON string, because that is the
+    shape the policy arithmetic ran over. Unreadable means "—" rather than a
+    guess: this column is the only place a sponsor learns what was asked for.
+    """
+    try:
+        products = json.loads(str(entry.get("products", "")))
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(products, list):
+        return ""
+    return ", ".join(
+        str(item["description"])
+        for item in products
+        if isinstance(item, dict) and item.get("description")
+    )
+
+
 def _ledger_rows_html(entries: list[Any]) -> str:
     if not entries:
         return render.empty("No attempts recorded for this person yet.")
@@ -474,18 +495,32 @@ def _ledger_rows_html(entries: list[Any]) -> str:
             if entry.get("session_id")
             else render.text("—")
         )
+        bought = _what_was_bought(entry) or "—"
+        # The rule and its wording, exactly as the policy engine wrote them.
+        # A sponsor reading "denied" without the reason learns nothing they can
+        # act on, and the reason is the one part of this row steward did not
+        # author.
+        rule_html = ""
+        if entry.get("reason"):
+            rule_html = (
+                f'<span class="rule">{render.text(entry["reason"])}'
+                f' <span class="rule-id">[{render.text(entry.get("rule_id", ""))}]</span></span>'
+            )
         cells.append(
             (
-                render.text(entry.get("description", "")),
+                f"{render.text(bought)}{rule_html}",
                 _merchant_html(str(entry.get("merchant_name", ""))),
                 amount_html,
                 render.badge(verdict or "unrecorded"),
-                f'<span class="sub">{session_html}</span>',
+                (
+                    f'<span class="sub">{render.when(str(entry.get("ts", "")))}</span>'
+                    f'<span class="sub">{session_html}</span>'
+                ),
             )
         )
     if not cells:
         return render.empty("pay-warden returned nothing this surface could read.")
-    return render.rows(("what", "merchant", "amount", "verdict", ""), cells)
+    return render.rows(("what", "merchant", "amount", "verdict", "when"), cells)
 
 
 # --- the pilot counts --------------------------------------------------------
