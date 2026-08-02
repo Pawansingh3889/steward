@@ -320,9 +320,24 @@ class Router:
         return Handled(sponsor_id, "approved", replies, detail=str(escalation["id"]))
 
     def _decline(self, sponsor_id: int, escalation: dict[str, Any]) -> Handled:
-        result = purchase.decline(
-            int(escalation["id"]), sponsor_id=sponsor_id, db_path=self.db_path
-        )
+        try:
+            result = purchase.decline(
+                int(escalation["id"]),
+                sponsor_id=sponsor_id,
+                db_path=self.db_path,
+                client=self.warden,
+            )
+        except (purchase.PurchaseError, WardenError) as exc:
+            # Saying no now reaches the policy engine, so it can fail like
+            # saying yes can. Telling the sponsor it was declined when the
+            # engine still has it open would be the worse answer: the attempt
+            # would stay releasable by anyone who approved it later.
+            return Handled(
+                sponsor_id,
+                "decline_failed",
+                [self.send(sponsor_id, f"I couldn't record that no: {exc}", about="decline_failed")],
+                str(exc),
+            )
         replies = [
             self.send(sponsor_id, f"Declined — {result['description']}.", about="declined"),
             # Told plainly, without inventing a reason the sponsor did not give.

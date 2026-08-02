@@ -816,8 +816,13 @@ def cmd_approvals_approve(args: argparse.Namespace) -> int:
 def cmd_approvals_decline(args: argparse.Namespace) -> int:
     person = _resolve_person(args)
     try:
-        result = purchase.decline(int(args.id), sponsor_id=int(person["id"]), db_path=args.db)
-    except purchase.PurchaseError as exc:
+        result = purchase.decline(
+            int(args.id), sponsor_id=int(person["id"]), db_path=args.db, note=args.note
+        )
+    except (purchase.PurchaseError, WardenError) as exc:
+        # A decline now has to reach pay-warden, so it can fail the way an
+        # approval can. Saying "declined" when the engine still holds it open
+        # would leave the attempt releasable by whoever approved it next.
         raise SystemExit(str(exc)) from exc
     _out(f"declined: {result['description']}")
     return 0
@@ -1119,6 +1124,11 @@ def build_parser() -> argparse.ArgumentParser:
     declining = approvals_sub.add_parser("decline", help="refuse a parked purchase")
     _add_person_flags(declining)
     declining.add_argument("--id", type=int, required=True, help="escalation id")
+    declining.add_argument(
+        "--note",
+        default="",
+        help="your own words, kept apart from the rule the policy engine gave",
+    )
     declining.set_defaults(func=cmd_approvals_decline)
 
     serving = sub.add_parser("serve", help="a read-only dashboard for one sponsor")

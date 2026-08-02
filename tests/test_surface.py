@@ -18,7 +18,7 @@ from steward.surface.base import NO, OTHER, YES, Inbound, Outbound, RecordingCha
 from steward.surface.router import Router
 
 from .agent_stub import OpenAIStub, completion
-from .warden_stub import WardenStub, parked, released
+from .warden_stub import WardenStub, parked, refused, released
 
 SPENDER_LINE = "+447700900002"
 SPONSOR_LINE = "+447700900001"
@@ -186,7 +186,7 @@ def test_no_declines_it_and_the_spender_is_told_plainly(
     model = OpenAIStub(
         [completion(tool_calls=[("request_purchase", SOAP)]), completion(content="Waiting.")]
     )
-    box = router(db, channel, http=model.client(), warden=WardenStub([parked()]))
+    box = router(db, channel, http=model.client(), warden=WardenStub([parked(), refused()]))
     box.receive(Inbound(sender=SPENDER_LINE, body="I'm out of soap"))
 
     handled = box.receive(Inbound(sender=SPONSOR_LINE, body="no"))

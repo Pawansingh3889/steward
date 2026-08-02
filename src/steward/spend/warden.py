@@ -426,6 +426,28 @@ def request(
     )
 
 
+def reject(attempt_id: str, note: str = "", *, warden: Warden | None = None) -> str:
+    """Tell pay-warden the sponsor said no, so the attempt stops being releasable.
+
+    It used to be enough to do nothing: an attempt nobody released stayed parked,
+    which was the correct end state when parked was the only end state there was.
+    Now that pay-warden records a refusal, staying silent leaves the two sides
+    disagreeing — steward saying declined, the policy engine still saying it is
+    waiting on somebody — and anything reading the engine would count a decided
+    request as an open one forever.
+
+    Returns the reason pay-warden had recorded, so the caller can relay the rule
+    that fired rather than a paraphrase of it.
+    """
+    client = warden or StdioWarden()
+    payload = client.call("reject_purchase", {"attempt_id": attempt_id, "note": note})
+    if isinstance(payload, dict) and payload.get("error"):
+        raise WardenError(str(payload["error"]))
+    if not isinstance(payload, dict) or not payload.get("rejected"):
+        raise WardenError(f"pay-warden did not record a refusal of {attempt_id}: {payload!r:.200}")
+    return str(payload.get("reason", ""))
+
+
 def release(attempt_id: str, *, warden: Warden | None = None) -> Decision:
     """Replay a parked attempt after the sponsor approved it.
 
