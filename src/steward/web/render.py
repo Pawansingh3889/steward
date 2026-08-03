@@ -18,27 +18,14 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from html import escape
 
-from ..models import money
+from ..models import TONES, UNRECOGNISED, money, tone_of
 from . import style
 
-# Statuses that carry data, and the tone each is drawn in. Declining is a
-# legitimate answer someone gave, not a failure, so it is not red.
-TONES = {
-    "pending": "wait",
-    "approved": "good",
-    "allowed": "good",
-    "declined": "flat",
-    "denied": "bad",
-    "needs_approval": "wait",
-    "active": "good",
-    "draft": "flat",
-    "done": "good",
-    "abandoned": "flat",
-    "requested": "wait",
-    "refunded": "good",
-    "refused": "flat",
-}
-UNRECOGNISED = "unknown"
+# TONES, UNRECOGNISED and tone_of moved to models.py so the CLI can draw the
+# same verdict in the same tone without importing this package — see the note
+# there. Re-exported because this is still where a reader of the web surface
+# looks for them.
+__all__ = ["TONES", "UNRECOGNISED", "tone_of"]
 
 
 def text(value: object) -> str:
@@ -68,16 +55,6 @@ def when(iso: str) -> str:
     if len(iso) <= 10:
         return text(f"{day} {moment.year}")
     return text(f"{day}, {moment.strftime('%H:%M')}")
-
-
-def tone_of(status: str) -> str:
-    """An unrecognised status is never drawn as a good one.
-
-    Same discipline as `warden._decision`, for the same reason: a verdict the
-    two sides of a protocol disagree about is not permission, and colouring it
-    green would be this surface asserting something nobody said.
-    """
-    return TONES.get(status, UNRECOGNISED)
 
 
 def badge(label: str, status: str = "") -> str:

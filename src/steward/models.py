@@ -105,3 +105,39 @@ class Trigger:
     ASK = "ask"  # a human typed something
     SCHEDULED = "scheduled"  # a timer
     INBOUND = "inbound"  # a text arrived
+
+
+# Statuses that carry data, and the tone each is drawn in. Declining is a
+# legitimate answer someone gave, not a failure, so it is not red.
+#
+# Here rather than in `web/render.py`, where it started, because the CLI draws
+# the same verdicts and importing the web package to ask about a colour pulls
+# Starlette into every `steward` invocation. This module exists so that layers
+# share a vocabulary instead of each minting its own — and a verdict that reads
+# amber on the dashboard and green in the terminal would be two vocabularies.
+TONES = {
+    "pending": "wait",
+    "approved": "good",
+    "allowed": "good",
+    "declined": "flat",
+    "denied": "bad",
+    "needs_approval": "wait",
+    "active": "good",
+    "draft": "flat",
+    "done": "good",
+    "abandoned": "flat",
+    "requested": "wait",
+    "refunded": "good",
+    "refused": "flat",
+}
+UNRECOGNISED = "unknown"
+
+
+def tone_of(status: str) -> str:
+    """An unrecognised status is never drawn as a good one.
+
+    Same discipline as `warden._decision`, for the same reason: a verdict the
+    two sides of a protocol disagree about is not permission, and colouring it
+    green would be a surface asserting something nobody said.
+    """
+    return TONES.get(status, UNRECOGNISED)
