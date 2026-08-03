@@ -1,0 +1,111 @@
+# podman compose up
+#
+# Brings up all three surfaces against one seeded database:
+#
+#   http://127.0.0.1:8787   Rae Whitfield's dashboard    (read-only)
+#   http://127.0.0.1:8789   Marcus Idowu's dashboard     (read-only, second household)
+#   http://127.0.0.1:8788   the demo console             (both lines, has a text box)
+#
+# --- why every service is on the host network -------------------------------
+#
+# This is a requirement, not a convenience, and two separate things in this
+# codebase demand it:
+#
+#   * `steward serve` binds 127.0.0.1, hard-coded, and `config.web_port`
+#     explains at length that the address is deliberately not a setting: the
+#     dashboard has no authentication, which is only defensible while it cannot
+#     be reached from another machine. On a bridge network it would bind the
+#     *container's* loopback and be unreachable from anywhere, including you.
+#
+#   * `extract/local.py` refuses an OLLAMA_BASE that is not loopback, because
+#     that check is the whole of "raw text never leaves the device". A bridge
+#     network would make Ollama `http://ollama:11434` or
+#     `host.containers.internal`, both non-loopback, and the only way through
+#     would be STEWARD_LOCAL_LLM_ALLOW_REMOTE=1 — switching off the guarantee to
+#     make the container convenient.
+#
+# Sharing the host's network namespace means 127.0.0.1 genuinely is this
+# machine, so the loopback check passes because it is true rather than because
+# it was disabled. `ports:` is therefore absent everywhere on purpose: with host
+# networking it is ignored, and listing it would imply an isolation that is not
+# there.
+#
+# Linux only, which is where Podman runs natively anyway.
+
+services:
+  # Runs once, then exits. Without --fresh, so `up` a second time leaves the
+  # household you have been typing into alone; the script refuses a populated
+  # database and the `|| true` turns that refusal into a successful no-op.
+  seed:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: localhost/steward:latest
+    network_mode: host
+    volumes:
+      - steward-data:/data
+    environment:
+      STEWARD_DB: /data/steward.sqlite3
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        python scripts/seed_demo.py --db "$${STEWARD_DB}"
+        || echo "already seeded — leaving the existing household alone"
+    restart: "no"
+
+  dashboard-rae:
+    image: localhost/steward:latest
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    network_mode: host
+    volumes:
+      - steward-data:/data
+    environment:
+      STEWARD_DB: /data/steward.sqlite3
+      STEWARD_WEB_PORT: "8787"
+    command: ["serve", "--person", "1"]
+    restart: unless-stopped
+
+  # A second process for a second household, because that is the design rather
+  # than a limitation: `scope.py` binds one sponsor before the server listens,
+  # so no route carries a person id and there is no authorisation check in a
+  # handler for anyone to delete. Two households means two processes.
+  dashboard-marcus:
+    image: localhost/steward:latest
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    network_mode: host
+    volumes:
+      - steward-data:/data
+    environment:
+      STEWARD_DB: /data/steward.sqlite3
+      STEWARD_WEB_PORT: "8789"
+    command: ["serve", "--person", "4"]
+    restart: unless-stopped
+
+  console:
+    image: localhost/steward:latest
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    network_mode: host
+    volumes:
+      - steward-data:/data
+    environment:
+      STEWARD_DB: /data/steward.sqlite3
+      # Unset this line and recall falls back to the built-in lexical matcher,
+      # which is a working install. Set, it needs Ollama on this machine with an
+      # embedding-capable model pulled — `ollama pull nomic-embed-text`. Chat
+      # models do not declare the embedding capability and return 500.
+      #
+      # Changing this value changes the width of the vectors, so run
+      # `memory reindex` afterwards or existing episodes stop matching.
+      STEWARD_EMBEDDING_MODEL: nomic-embed-text
+      OLLAMA_BASE: http://127.0.0.1:11434
+    command: ["console", "--port", "8788"]
+    restart: unless-stopped
+
+volumes:
+  steward-data:
