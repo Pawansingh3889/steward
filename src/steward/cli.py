@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -27,7 +28,7 @@ from .extract.eta import Point
 from .integrations import prices, sync
 from .integrations.google import GoogleError
 from .memory import recall
-from .models import FactKind, Role, money
+from .models import FactKind, Role, money, tone_of
 from .plan import goals, schedule
 from .plan.schedule import PlanError
 from .spend import grant, purchase, refund, warden
@@ -36,7 +37,63 @@ from .surface.base import Inbound, RecordingChannel
 from .surface.linq import LinqChannel
 from .surface.router import Router
 
-BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+# Every escape sequence this file emits comes from these names, which is what
+# makes turning colour off a matter of emptying six strings rather than finding
+# ninety-three call sites. They start empty: a module that has not been told
+# there is a terminal must not assume one.
+BOLD = DIM = RESET = ""
+# Tones, and they are the same four the web surface uses in `render.TONES` —
+# green for a decision that went through, amber for one waiting on a person, red
+# for a refusal, and nothing at all for an answer somebody legitimately gave.
+# A verdict should not change colour depending on which surface you read it on.
+GOOD = WAIT = BAD = ""
+
+_SEQUENCES = {
+    "BOLD": "\033[1m",
+    "DIM": "\033[2m",
+    "RESET": "\033[0m",
+    "GOOD": "\033[32m",
+    "WAIT": "\033[33m",
+    "BAD": "\033[31m",
+}
+
+
+def _colour_wanted(argv_says_no: bool) -> bool:
+    """Whether to emit ANSI at all.
+
+    The signals, in the order the ecosystem has settled on. `NO_COLOR` is a
+    standing answer the user gave once for every program on the machine, so it
+    outranks everything but an explicit flag. `FORCE_COLOR` is how a CI or a
+    pager says it renders colour despite not being a terminal.
+
+    Falling through to `isatty` is the part that was missing: colour used to be
+    unconditional, so every redirected file and CI log this CLI ever wrote got
+    `\\033[1m` in it, and `steward memory list > notes.txt` produced a file that
+    was unreadable in anything that does not interpret escapes.
+    """
+    if argv_says_no or os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def _set_palette(enabled: bool) -> None:
+    """Fill the escape sequences, or leave them empty."""
+    globals().update({name: (seq if enabled else "") for name, seq in _SEQUENCES.items()})
+
+
+def tone(status: str) -> str:
+    """The colour a verdict is drawn in, by the same rule the dashboard uses.
+
+    Unrecognised statuses get no colour rather than a cheerful one, for the
+    reason `render.tone_of` gives: a verdict this side does not recognise is not
+    permission, and painting it green would be the CLI asserting something
+    nobody said.
+    """
+    return {"good": GOOD, "wait": WAIT, "bad": BAD}.get(tone_of(status), "")
 
 
 def _out(text: str = "") -> None:
@@ -156,8 +213,14 @@ def cmd_memory_search(args: argparse.Namespace) -> int:
     if not found:
         _out(f"{DIM}nothing resembling that — as far as steward knows, it was never said.{RESET}")
         return 0
+    # The sentence is what the person came to read. The id and the score are
+    # scaffolding for the next command, so they recede rather than compete —
+    # which is the same reason the dashboard draws its labels in --ink-faint.
     for episode in found:
-        _out(f"  {episode['episode_id']:>4}  [{episode['similarity']:.2f}]  {episode['text']}")
+        _out(
+            f"  {DIM}{episode['episode_id']:>4}  {episode['similarity']:.2f}{RESET}"
+            f"  {episode['text']}"
+        )
     return 0
 
 
@@ -332,7 +395,9 @@ def cmd_spend_preview(args: argparse.Namespace) -> int:
     if args.json:
         _out(json.dumps(decision.as_dict(), indent=2))
         return 0
-    _out(f"\n  {BOLD}{decision.verdict}{RESET}  [{decision.rule_id}]")
+    _out(
+        f"\n  {tone(decision.verdict)}{BOLD}{decision.verdict}{RESET}  {DIM}[{decision.rule_id}]{RESET}"
+    )
     _out(f"  {DIM}{decision.reason}{RESET}\n")
     return 0 if decision.allowed else 1
 
@@ -854,6 +919,12 @@ def cmd_memory_reindex(args: argparse.Namespace) -> int:
     # the embedder rather than a fact about it.
     width = f", {result['dimensions']} dimensions" if result["dimensions"] else ""
     _out(f"{DIM}using {result['embedder']}{width}{RESET}")
+    _out(f"{DIM}a match needs {result['min_similarity']:.2f} similarity{RESET}")
+    if not result["calibrated"]:
+        _out(
+            f"{DIM}nobody has measured a floor for this model, so it is on the strict"
+            f" default — recall will be quiet until one is measured for it.{RESET}"
+        )
     if result["embedder"] == "HashingEmbedder" and config.embedding_model():
         _out(
             f"{DIM}STEWARD_EMBEDDING_MODEL is set but {embed.why_lexical()} —"
@@ -999,6 +1070,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="steward", description=__doc__)
     parser.add_argument("--db", default=None, help="database path (default: $STEWARD_DB)")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--no-color", action="store_true", help="plain text, no escape sequences")
     sub = parser.add_subparsers(dest="command", required=True)
 
     people = sub.add_parser("people", help="who steward knows about").add_subparsers(
@@ -1272,6 +1344,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Before any output. --json never gets colour regardless: the whole point of
+    # that flag is that something downstream parses what comes out, and an
+    # escape sequence in front of a brace is a parse error waiting to happen.
+    _set_palette(_colour_wanted(args.no_color or args.json))
     store.init_db(args.db)
     result: int = args.func(args)
     return result

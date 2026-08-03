@@ -213,6 +213,101 @@ def test_a_reindex_that_gives_out_part_way_exits_rather_than_tracing_back(
         run(db, "memory", "reindex")
 
 
+# --- colour ------------------------------------------------------------------
+
+
+def _escapes(text: str) -> bool:
+    return "\033" in text
+
+
+def test_a_redirected_run_carries_no_escape_sequences(
+    db: str, person: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Colour used to be unconditional, so `steward memory list > notes.txt`
+    wrote a file full of \\033[1m. capsys is not a terminal, which is exactly
+    the case that was broken."""
+    run(db, "memory", "list")
+
+    assert not _escapes(capsys.readouterr().out)
+
+
+def test_no_color_is_obeyed(
+    db: str, person: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A standing answer the user gave once, for every program on the machine.
+    It outranks a terminal being present, and outranks FORCE_COLOR."""
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    run(db, "memory", "list")
+
+    assert not _escapes(capsys.readouterr().out)
+
+
+def test_the_flag_wins_over_a_terminal(
+    db: str, person: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+
+    run(db, "--no-color", "memory", "list")
+
+    assert not _escapes(capsys.readouterr().out)
+
+
+def test_a_terminal_does_get_colour(
+    db: str, person: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half: gating it off everywhere would be its own bug."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("TERM", raising=False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+
+    run(db, "memory", "list")
+
+    assert _escapes(capsys.readouterr().out)
+
+
+def test_json_is_never_coloured_even_on_a_terminal(
+    db: str, person: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Something downstream parses this. An escape sequence in front of a brace
+    is a parse error waiting to happen."""
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+    run(db, "--json", "memory", "list")
+
+    out = capsys.readouterr().out
+    assert not _escapes(out)
+    json.loads(out)
+
+
+def test_the_terminal_and_the_dashboard_agree_about_a_verdict() -> None:
+    """One vocabulary, in models.py, because a verdict that reads amber on the
+    dashboard and green in the terminal would be two."""
+    from steward.models import tone_of
+    from steward.web import render
+
+    assert render.tone_of is tone_of
+    assert tone_of("allowed") == "good"
+    assert tone_of("needs_approval") == "wait"
+    assert tone_of("denied") == "bad"
+    # A legitimate answer somebody gave, so not red — and an unknown verdict is
+    # never dressed up as a good one.
+    assert tone_of("declined") == "flat"
+    assert tone_of("something nobody has heard of") == render.UNRECOGNISED
+
+    cli._set_palette(True)
+    try:
+        assert cli.tone("allowed") and cli.tone("denied")
+        assert cli.tone("allowed") != cli.tone("denied")
+        assert cli.tone("declined") == ""
+        assert cli.tone("something nobody has heard of") == ""
+    finally:
+        cli._set_palette(False)
+
+
 def test_json_output_is_machine_readable(
     db: str, person: int, capsys: pytest.CaptureFixture[str]
 ) -> None:
