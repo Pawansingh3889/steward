@@ -25,10 +25,17 @@ from . import embed
 from .embed import Embedder
 
 DEFAULT_LIMIT = 5
-# Below this, a "match" is hash noise rather than a resemblance. Tuned against
-# the lexical embedder: unrelated household sentences land near zero, and a
-# genuine restatement clears it comfortably.
-MIN_SIMILARITY = 0.12
+# Only for an embedder that declares no floor of its own — a test double, or
+# something duck-typed from outside this package. The real floors live on the
+# embedders, in embed.py, because the number is a property of the model that
+# produced the score and not of this module.
+#
+# This constant used to be *the* threshold, at 0.12, described as tuned so that
+# "unrelated household sentences land near zero". Measured against a labelled
+# corpus that turned out to be false twice over: 5% of unrelated lexical pairs
+# already cleared it, and under nomic-embed-text nothing scores below 0.24, so
+# it matched every episode for every query.
+FALLBACK_MIN_SIMILARITY = 0.22
 
 
 @dataclass
@@ -39,7 +46,7 @@ class Episode:
     similarity: float
 
 
-def _encode(embedder: Embedder, text: str) -> list[float]:
+def _encode(embedder: Embedder, text: str) -> tuple[list[float], Embedder]:
     """Encode, and fall back to the lexical matcher if the model cannot.
 
     Reaching a model that is running is checked once, at construction. This is
@@ -51,11 +58,18 @@ def _encode(embedder: Embedder, text: str) -> list[float]:
     because an embedding was slow would trade the thing they asked for against
     the thing they did not. The lexically-encoded episode is a narrower memory,
     not a lost one, and `memory reindex` upgrades it later.
+
+    Returns the embedder that *actually* produced the vector, which the caller
+    needs and cannot infer. Scores are only comparable to the floor belonging to
+    the thing that computed them: judging a fallen-back lexical query (true pairs
+    average 0.07) against nomic's floor of 0.55 would return nothing at all, and
+    it would look like the person had never said anything.
     """
     try:
-        return embedder.encode(text)
+        return embedder.encode(text), embedder
     except embed.EmbeddingError:
-        return embed.HashingEmbedder().encode(text)
+        lexical = embed.HashingEmbedder()
+        return lexical.encode(text), lexical
 
 
 def remember(
@@ -89,7 +103,7 @@ def remember(
     embedder = embedder or embed.build()
     if not embed.tokenize(text):
         return None
-    vector = _encode(embedder, text)
+    vector, _ = _encode(embedder, text)
     return store.insert_episode(
         person_id=person_id,
         text=text,
@@ -104,7 +118,7 @@ def search(
     person_id: int,
     query: str,
     limit: int = DEFAULT_LIMIT,
-    min_similarity: float = MIN_SIMILARITY,
+    min_similarity: float | None = None,
     embedder: Embedder | None = None,
     db_path: str | None = None,
 ) -> list[Episode]:
@@ -115,7 +129,12 @@ def search(
     mentioned you were out of soap" is worse than silence when they never did.
     """
     embedder = embedder or embed.build()
-    target = _encode(embedder, query)
+    target, used = _encode(embedder, query)
+    if min_similarity is None:
+        # From the embedder that produced `target`, not the one configured —
+        # see `_encode`. `getattr` so a duck-typed embedder without a floor
+        # still works rather than raising.
+        min_similarity = getattr(used, "min_similarity", FALLBACK_MIN_SIMILARITY)
     scored: list[Episode] = []
     for row in store.list_episodes(person_id, db_path=db_path):
         vector = embed.unpack(bytes(row["embedding"]))
@@ -201,4 +220,9 @@ def reindex(
         "skipped": skipped,
         "embedder": type(embedder).__name__,
         "dimensions": getattr(embedder, "dimensions", 0),
+        "min_similarity": getattr(embedder, "min_similarity", FALLBACK_MIN_SIMILARITY),
+        # False means nobody has measured a floor for this model and it is
+        # running on the strict default. Worth saying out loud: it is the
+        # difference between "recall is quiet" and "recall is broken".
+        "calibrated": getattr(embedder, "calibrated", True),
     }

@@ -434,6 +434,62 @@ def test_a_refused_host_is_not_reported_as_an_unreachable_one(monkeypatch) -> No
     assert "nothing answered" in embed.why_lexical()
 
 
+def test_each_embedder_carries_its_own_floor() -> None:
+    """The number is a property of the model that produced the score. Measured
+    against a labelled corpus: 0.12 sits above the lexical embedder's noise but
+    *below every score nomic can produce*, so one constant is three mistakes."""
+    assert embed.HashingEmbedder().min_similarity == 0.22
+    assert embed.floor_for("all-minilm") == 0.35
+    assert embed.floor_for("nomic-embed-text") == 0.55
+    # The tag is not part of the model's identity for this purpose.
+    assert embed.floor_for("nomic-embed-text:latest") == 0.55
+
+
+def test_an_unmeasured_model_gets_the_strict_default() -> None:
+    """Quiet recall is recoverable by measuring one. Noisy recall hands the
+    agent false evidence, which it will go on to state as fact."""
+    assert embed.floor_for("something-nobody-has-measured") == embed.UNCALIBRATED_FLOOR
+    assert embed.UNCALIBRATED_FLOOR >= max(embed._FLOORS.values())
+
+
+def test_the_floor_follows_the_embedder_that_actually_encoded(db: str, person: int) -> None:
+    """The trap in the fallback. `_encode` drops to the lexical matcher when the
+    model fails a call — so the query vector is lexical, scoring around 0.07 on
+    a true pair, and judging it against a local model's 0.55 would return
+    nothing and read as "you never said that"."""
+
+    class DeadModel:
+        dimensions = 768
+        min_similarity = 0.55
+
+        def encode(self, text: str) -> list[float]:
+            raise embed.EmbeddingError("500 from the runner")
+
+    episodic.remember(person_id=person, text="I'm out of soap", db_path=db)
+
+    # Stored lexically; the query falls back to lexical too, so both sides are
+    # on the same scale and the lexical floor is the one that applies.
+    found = episodic.search(person_id=person, query="soap", embedder=DeadModel(), db_path=db)
+
+    assert [e.text for e in found] == ["I'm out of soap"]
+
+
+def test_an_embedder_with_no_floor_still_works(db: str, person: int) -> None:
+    """Duck-typed doubles from outside this package must not have to know about
+    any of this."""
+
+    class Plain:
+        dimensions = 8
+
+        def encode(self, text: str) -> list[float]:
+            return embed.normalize([1.0] + [0.0] * 7)
+
+    assert episodic.remember(person_id=person, text="out of soap", embedder=Plain(), db_path=db)
+    found = episodic.search(person_id=person, query="soap", embedder=Plain(), db_path=db)
+
+    assert len(found) == 1
+
+
 def test_nothing_explains_away_a_working_model(monkeypatch) -> None:
     """ "" means build() really is handing back the local one — the notice in
     `memory reindex` hangs off this being empty."""

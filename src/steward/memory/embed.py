@@ -50,9 +50,17 @@ _STOPWORDS = frozenset([
 
 
 class Embedder(Protocol):
-    """Anything that turns text into a fixed-length unit vector."""
+    """Anything that turns text into a fixed-length unit vector.
+
+    `min_similarity` travels with the embedder because it has to. What counts as
+    a resemblance is a property of the thing doing the measuring: the same 0.12
+    that sits well above the lexical embedder's noise is *below every score
+    nomic-embed-text can produce*, so a shared constant is not a threshold, it
+    is three different mistakes.
+    """
 
     dimensions: int
+    min_similarity: float
 
     def encode(self, text: str) -> list[float]: ...
 
@@ -63,6 +71,13 @@ def tokenize(text: str) -> list[str]:
 
 class HashingEmbedder:
     """The zero-dependency default. See the module docstring for its limits."""
+
+    # Measured against a 38-episode household corpus with labelled queries: this
+    # is where F1 peaks. The 0.12 that shipped before was under-tuned even here —
+    # 5% of unrelated pairs already cleared it. "Unrelated sentences land near
+    # zero" is only true of sentences sharing no tokens at all, and real
+    # household sentences share "need", "the", "coming" all the time.
+    min_similarity = 0.22
 
     def __init__(self, dimensions: int = DIMENSIONS) -> None:
         self.dimensions = dimensions
@@ -117,6 +132,31 @@ def unpack(blob: bytes) -> list[float]:
     return list(struct.unpack(f"<{len(blob) // 4}f", blob))
 
 
+# Floors measured per model on the same labelled corpus, at the F1 optimum.
+# These are not interchangeable and the spread is the whole point: a query that
+# resembles nothing scores near 0.00 under the lexical embedder, around 0.10
+# under all-minilm and around 0.39 under nomic. Cross-applying them is not a
+# rounding error — 0.35 on the lexical embedder drops recall to 0.077, and 0.12
+# on nomic matches literally everything, because nomic's *lowest* score against
+# any text at all is +0.24.
+_FLOORS = {
+    "all-minilm": 0.35,  # 384d
+    "nomic-embed-text": 0.55,  # 768d
+}
+
+# For a model nobody has calibrated. There is no safe number here — the scale is
+# a property of the model and cannot be guessed — so this is deliberately strict:
+# a quiet memory is recoverable by measuring and adding a row above, whereas a
+# noisy one hands the agent false evidence it will state as fact. `steward memory
+# reindex` says when this is what is in force.
+UNCALIBRATED_FLOOR = 0.55
+
+
+def floor_for(model: str) -> float:
+    """The similarity floor for a named model, ignoring any `:tag` suffix."""
+    return _FLOORS.get(model.split(":")[0], UNCALIBRATED_FLOOR)
+
+
 class OllamaEmbedder:
     """Vectors from a model on this machine.
 
@@ -158,6 +198,11 @@ class OllamaEmbedder:
         self._http = http
         self._timeout = timeout
         self.dimensions = 0
+        # Keyed on the model, not on this class. An instance of OllamaEmbedder
+        # is not one measuring device — it is whichever one the environment
+        # names, and they do not agree about what a resemblance is.
+        self.min_similarity = floor_for(model)
+        self.calibrated = model.split(":")[0] in _FLOORS
 
     def encode(self, text: str) -> list[float]:
         import httpx
